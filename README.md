@@ -3,11 +3,12 @@
 
 Legacy embedded 시스템을 위한 IPC를 위한 경량 메시지 큐(MQ) 데몬/서비스입니다.  
 SQS처럼 단순한 사용성을 목표로 하며, 레거시 임베디드 환경에서 장비 변경 및 신규 프로세스 도입으로 복잡해지는 프로세스 간 메시지 통신을 저비용/저사양으로 처리하도록 설계되었습니다.
-네트워크 통신이 아닌 파일/DB(SQLite)를 통한 통신으로 최소 요구 사양을 요구하는 시스템 설계를 위한 소프트웨어 입니다.
+네트워크 통신이 아닌 파일/DB(SQLite) 및 파일 기반 Mailbox IPC를 통한 통신으로 최소 요구 사양을 요구하는 시스템 설계를 위한 소프트웨어 입니다.
 
 - 메시지 및 설정/정책: **JSON**
-- 운영 형태: **Manager Process(데몬) + Consumer Process(Main Process) + CLI**
-- 스토리지 백엔드(옵션): **FileSystem / SQLite**
+- 운영 형태: **Manager Process(데몬) + Client(Process/CLI) + Mailbox IPC**
+- IPC 채널: **Mailbox (File-based IPC)**
+- 스토리지 백엔드(옵션): **FileSystem / SQLite / Hybrid**
 
 > 목표: RabbitMQ 등 “무거운 브로커”를 도입하기 어려운 현장에서, 디바이스 내부 IPC 메시징을 더 단순하고 저렴하게 운영할 수 있게 합니다.
 
@@ -17,16 +18,19 @@ SQS처럼 단순한 사용성을 목표로 하며, 레거시 임베디드 환경
 
 ### Components
 - **PublishCLI / Publish Process**
-  - 메시지(JSON)를 발행합니다.
+  - Mailbox에 publish 요청을 작성합니다.
 - **ConsumerCLI**
-  - Consumer(Main Process)를 제어/운영합니다. (pause/resume/status 등)
+  - Mailbox로 운영/상태 요청을 전송합니다. (pause/resume/status 등)
 - **Consumer Process (Main Process)**
-  - 선택된 백엔드(FileSystem 또는 SQLite)에서 메시지를 consume합니다.
+  - Mailbox로 ConsumeNext 요청을 전송하고 메시지를 처리합니다.
   - 메시지 validation 후 처리(handler)를 수행합니다.
+- **Mailbox IPC (File-based)**
+  - 요청/응답을 파일로 교환하는 로컬 IPC 채널입니다.
+  - atomic rename을 이용해 요청/응답의 일관성을 확보합니다.
 - **YiRangMessageQueue (Manager Process)**
-  - 큐/경로(또는 DB)와 정책을 관리합니다.
-  - lease(visibility timeout), retry, DLQ를 포함한 큐 동작을 오케스트레이션합니다.
-  - 내부적으로 **Backend Adapter(FileSystem/SQLite)** 를 통해 저장소를 추상화합니다.
+  - Mailbox 요청을 수신하여 큐/정책/스토리지를 오케스트레이션합니다.
+  - lease(visibility timeout), retry, DLQ를 포함한 큐 동작을 처리합니다.
+  - 내부적으로 **Backend Adapter(FileSystem/SQLite/Hybrid)** 를 통해 저장소를 추상화합니다.
 
 ### Storage Backends (Options)
 - **FileSystem**
@@ -35,123 +39,127 @@ SQS처럼 단순한 사용성을 목표로 하며, 레거시 임베디드 환경
 - **SQLite**
   - 메시지와 상태(ready/inflight/dlq 등)를 SQLite DB 파일에 저장합니다.
   - 상태 전이는 트랜잭션 기반 업데이트로 처리됩니다.
+- **Hybrid**
+  - 메시지 payload는 파일로 저장하고, 상태/인덱스는 SQLite로 관리합니다.
+  - 파일 가시성과 쿼리 성능의 절충안을 제공합니다.
+
+---
+
+## Mailbox IPC and Operation Modes
+
+### Mailbox IPC (File-based)
+- **요청/응답 파일 교환**: client는 `requests/`에 JSON 요청 파일을 작성하고, MainMQ는 처리 후 `responses/<clientId>/`에 응답 파일을 작성합니다.
+- **원자성**: `temp` 파일 작성 후 `rename`으로 commit합니다.
+- **재처리/복구**: 처리 지연 시 타임아웃 기준으로 재시도하거나, 오류 응답을 반환합니다.
+- **권한 분리**: Mailbox 폴더에 대한 read/write 권한을 프로세스별로 제한할 수 있습니다.
+
+### Operation Modes (Mailbox + Backend)
+- **Mailbox + SQLite**
+  - MainMQ가 SQLite에 단독 write를 수행하고, 모든 client는 Mailbox를 통해 요청합니다.
+  - 안정적 lease/retry/metrics 구현에 유리합니다.
+- **Mailbox + FileSystem**
+  - MainMQ가 파일 기반 큐를 관리하고, client는 Mailbox 요청만 수행합니다.
+  - 의존성 최소, 현장 디버깅 용이합니다.
+- **Hybrid (Mailbox + FileSystem + SQLite)**
+  - 메시지 payload는 파일, 상태/인덱스는 SQLite로 관리합니다.
+  - 대용량 payload와 빠른 상태 조회를 함께 제공합니다.
 
 ---
 
 ## Architecture
 
-### Flow (Backend-aware)
+### Flow (Mailbox-aware)
 
 ```mermaid
 flowchart LR
-  subgraph Producers["Publish Side"]
-    PCLI["PublishCLI"]
-    PPROC["Publish Process"]
+  subgraph Clients["Clients"]
+    PCLI["Publish Client"]
+    CCLI["Consume/Control Client"]
   end
 
-  subgraph Consumers["Consume Side"]
-    CCLI["ConsumerCLI"]
-    CPROC["Consumer Process<br/>(Main Process)<br/>- consumes from selected backend<br/>(FileSystem follow/poll OR SQLite query/poll)<br/>- validates + processes messages"]
+  subgraph IPC["Mailbox IPC (File-based)"]
+    REQ["requests/"]
+    RES["responses/<clientId>/"]
   end
 
-  subgraph Manager["YiRangMessageQueue<br/>(Manager Process)<br/>- backend selection: FileSystem | SQLite<br/>- queue registry + policy + routing<br/>- lease/retry/dlq orchestration"]
-    MAPI["Manager API/IPC<br/>(optional but recommended)"]
-    BE["Backend Adapter<br/>(FS Adapter / SQLite Adapter)"]
+  subgraph Manager["YiRangMessageQueue<br/>(Manager Process)<br/>- backend selection: FileSystem | SQLite | Hybrid<br/>- queue registry + policy + routing<br/>- lease/retry/dlq orchestration"]
+    MAPI["Mailbox Handler"]
+    BE["Backend Adapter<br/>(FS / SQLite / Hybrid)"]
   end
 
-  subgraph Storage["Storage Backend (JSON)"]
+  subgraph Storage["Storage Backend"]
     subgraph FS["FileSystem Backend"]
-      INBOX["Inbox Folder(s)<br/>(JSON messages)"]
-      META["Meta/State Folder(s)<br/>(JSON state, leases, offsets)"]
-      DLQ["DLQ Folder(s)<br/>(JSON dead letters)"]
-      ARCH["Archive Folder(s)<br/>(JSON processed)"]
-      CFG["Config Folder<br/>(JSON configs/policies)"]
+      INBOX["Inbox Folder(s)"]
+      META["Meta/State Folder(s)"]
+      DLQ["DLQ Folder(s)"]
+      ARCH["Archive Folder(s)"]
     end
 
     subgraph DB["SQLite Backend"]
-      SQLITE["SQLite DB File<br/>(messages + state + policies)<br/>JSON stored as TEXT/JSON columns"]
+      SQLITE["SQLite DB File<br/>(index/state/policies)"]
+    end
+
+    subgraph HYB["Hybrid Payload Storage"]
+      PAYLOAD["Payload Files"]
     end
   end
 
-  PCLI -->|"publish request"| MAPI
-  PPROC -->|"publish request"| MAPI
+  PCLI -->|"request file"| REQ
+  CCLI -->|"request file"| REQ
+  REQ --> MAPI
+  MAPI --> RES
   MAPI --> BE
-  BE -->|"persist message"| INBOX
-  BE -->|"persist message"| SQLITE
-
-  CCLI -->|"control/operate"| CPROC
-  CPROC -->|"consume loop"| MAPI
-  MAPI --> BE
-  BE -->|"read/lease messages"| INBOX
-  BE -->|"read/lease messages"| SQLITE
-
-  CPROC -->|"on success"| ARCH
-  CPROC -->|"on failure"| DLQ
-  CPROC -->|"update lease/retry state"| META
-  CPROC -->|"update state (ack/nack/dlq)"| SQLITE
+  BE --> INBOX
+  BE --> META
+  BE --> DLQ
+  BE --> ARCH
+  BE --> SQLITE
+  BE --> PAYLOAD
 ````
 
-### Publish → Consume Sequence (Backend-aware)
+### Publish → Consume Sequence (Mailbox-aware)
 
 ```mermaid
 sequenceDiagram
   autonumber
-  actor Publisher as PublishCLI/Publish Process
-  actor Operator as ConsumerCLI
+  actor Publisher as Publish Client
+  actor Consumer as Consume Client
+  participant MB as Mailbox<br/>(requests/responses)
   participant Mgr as YiRangMessageQueue<br/>(Manager Process)
-  participant BE as Backend Adapter<br/>(FS / SQLite)
-  participant FS as FileSystem Folders<br/>(JSON)
-  participant DB as SQLite DB File<br/>(JSON as TEXT)
-  participant Main as Consumer Process<br/>(Main Process)
+  participant BE as Backend Adapter<br/>(FS / SQLite / Hybrid)
+  participant FS as FileSystem Folders
+  participant DB as SQLite DB
+  participant PAY as Payload Files
 
-  Publisher->>Mgr: Publish(message JSON)
+  Publisher->>MB: Write Publish request (JSON)
+  MB->>Mgr: Deliver request (poll/watch)
   Mgr->>BE: Enqueue(message)
   alt backend = FileSystem
-    BE->>FS: Atomic write JSON file into Inbox<br/>(temp -> fsync -> rename)
+    BE->>FS: Atomic write into Inbox<br/>(temp -> fsync -> rename)
   else backend = SQLite
-    BE->>DB: INSERT message row (state=ready)<br/>commit transaction
+    BE->>DB: INSERT message row (state=ready)
+  else backend = Hybrid
+    BE->>PAY: Write payload file
+    BE->>DB: INSERT index/state
   end
+  Mgr-->>MB: Write Publish response
 
-  Main->>Mgr: ConsumeNext(leaseSeconds, consumerId)
-  Mgr->>BE: Dequeue/Lease()
+  Consumer->>MB: Write ConsumeNext request
+  MB->>Mgr: Deliver request
+  Mgr->>BE: LeaseNext()
   alt backend = FileSystem
-    BE->>FS: Watch/Poll Inbox & move to processing<br/>(rename as lease)
-    BE-->>Mgr: Return message JSON
+    BE->>FS: Move to processing (lease)
   else backend = SQLite
-    BE->>DB: SELECT+UPDATE state=ready->inflight<br/>set lease_until (transaction)
-    BE-->>Mgr: Return message JSON
+    BE->>DB: SELECT+UPDATE inflight + lease_until
+  else backend = Hybrid
+    BE->>DB: SELECT+UPDATE inflight
+    BE->>PAY: Read payload file
   end
+  Mgr-->>MB: Deliver message + lease token
 
-  Mgr-->>Main: Deliver message JSON + policy
-  Main->>Main: Validate JSON schema + headers
-  alt validation ok and processing ok
-    Main->>Mgr: Ack(messageId)
-    Mgr->>BE: Ack()
-    alt backend = FileSystem
-      BE->>FS: Move/Rename to Archive + write result metadata (JSON)
-    else backend = SQLite
-      BE->>DB: UPDATE state=archived (or delete)<br/>commit
-    end
-  else validation fail or processing fail
-    Main->>Mgr: Nack(messageId, reason)
-    Mgr->>BE: Nack()/RetryOrDLQ()
-    alt retry available
-      alt backend = FileSystem
-        BE->>FS: Update retry metadata + reschedule<br/>(move back or delay folder)
-      else backend = SQLite
-        BE->>DB: UPDATE attempt + next_attempt_at<br/>state=ready (or delayed)
-      end
-    else move to DLQ
-      alt backend = FileSystem
-        BE->>FS: Move message to DLQ + append failure JSON
-      else backend = SQLite
-        BE->>DB: UPDATE state=dlq + store failure JSON<br/>commit
-      end
-    end
-  end
-
-  Operator->>Main: Control commands (pause/resume/status)
-  Main-->>Operator: Report metrics/state
+  Consumer->>MB: Write Ack/Nack request
+  MB->>Mgr: Deliver request
+  Mgr->>BE: Ack / Nack / Delay / DLQ
 ```
 
 ---
@@ -216,18 +224,41 @@ sequenceDiagram
 * consume: 트랜잭션으로 SELECT+UPDATE하여 lease 확보 (state=ready→inflight, lease_until 설정)
 * ack/nack: state 업데이트 및 실패 메타 기록
 
-**Key-Value model (planned)**
+---
 
-* SQLite 테이블을 Redis-like `key`, `value` 컨셉으로 사용
-* value는 JSON(TEXT)로 저장하고, queue/state 조회를 위한 보조 컬럼/인덱스(또는 보조 테이블) 병행
-* key 네임스페이스 예: `queue:telemetry:message:{messageId}`, `queue:telemetry:policy`
+### 3) Hybrid Backend (File payload + SQLite index)
 
-## SQLite KV Schema (Draft)
+**Pros**
+
+* 대용량 payload를 파일로 분리하여 DB 부하를 낮춤
+* 상태/메트릭/검색은 SQLite로 빠르게 처리 가능
+* 파일 가시성과 DB 조회 성능을 동시에 확보
+
+**Cons**
+
+* 파일-DB 간 일관성 유지 로직이 필요
+* 장애 시 정합성 복구 절차가 추가됨
+* 구현 복잡도 증가
+
+**Operational behavior**
+
+* publish: payload 파일 저장 + SQLite에 index/state 삽입 (원자성 보장 필요)
+* consume: SQLite에서 lease 확보 후 payload 파일을 로드
+* ack/nack: SQLite 상태 전이 + 필요 시 payload 파일 정리
+
+**Key-Value model (current SQLite adapter)**
+
+* SQLite는 `kv` 테이블에 메시지/정책을 JSON(TEXT)로 저장하고, `msg_index`로 큐 조회를 처리합니다.
+* `msg_index`에는 `queue/state/priority/available_at/lease_until/attempt`가 포함됩니다.
+* policy key는 `policy:{queue}` 형식으로 저장합니다. MQCLI는 `msg:{queue}:{guid}` 형식의 key를 사용합니다.
+
+## SQLite KV Schema (Current Template)
 
 KV로 원본 데이터를 저장하고, 큐 조회는 보조 인덱스 테이블을 사용합니다.
+실제 스키마는 `MainMQ/sqlite_schema.sql` 템플릿에서 `{{kv_table}}`, `{{msg_index_table}}`을 치환합니다.
 
 ```sql
-CREATE TABLE kv (
+CREATE TABLE IF NOT EXISTS kv (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL,
   value_type TEXT NOT NULL,
@@ -236,25 +267,30 @@ CREATE TABLE kv (
   expires_at INTEGER
 );
 
-CREATE TABLE msg_index (
+CREATE INDEX IF NOT EXISTS idx_kv_type ON kv(value_type);
+CREATE INDEX IF NOT EXISTS idx_kv_expires ON kv(expires_at) WHERE expires_at IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS msg_index (
   queue TEXT NOT NULL,
   state TEXT NOT NULL,
   priority INTEGER NOT NULL DEFAULT 0,
   available_at INTEGER NOT NULL,
   lease_until INTEGER,
   attempt INTEGER NOT NULL DEFAULT 0,
-  message_key TEXT NOT NULL REFERENCES kv(key) ON DELETE CASCADE
+  message_key TEXT NOT NULL REFERENCES kv(key) ON DELETE CASCADE,
+  PRIMARY KEY (message_key)
 );
 
-CREATE INDEX idx_msg_ready ON msg_index(queue, state, available_at, priority);
-CREATE INDEX idx_msg_lease ON msg_index(state, lease_until);
+CREATE INDEX IF NOT EXISTS idx_msg_ready ON msg_index(queue, state, available_at, priority DESC);
+CREATE INDEX IF NOT EXISTS idx_msg_lease ON msg_index(state, lease_until) WHERE state = 'inflight';
+CREATE INDEX IF NOT EXISTS idx_msg_delayed ON msg_index(state, available_at) WHERE state = 'delayed';
+CREATE INDEX IF NOT EXISTS idx_msg_dlq ON msg_index(queue, state) WHERE state = 'dlq';
 ```
 
 Key 네임스페이스 예시:
 
-* `queue:telemetry:message:{messageId}`
-* `queue:telemetry:policy`
-* `queue:telemetry:lease:{messageId}`
+* `policy:{queue}` (현재 사용)
+* `msg:{queue}:{guid}` (MQCLI 기본 포맷)
 
 ---
 
@@ -281,6 +317,20 @@ Key 네임스페이스 예시:
     "temp": 36.1,
     "rpm": 1200
   }
+}
+```
+
+현재 SQLiteAdapter는 아래와 같은 최소 envelope를 저장합니다. (`payload`, `attributes`는 JSON string으로 저장됨)
+
+```json
+{
+  "messageId": "uuid",
+  "queue": "telemetry",
+  "payload": "{...}",
+  "attributes": "{...}",
+  "priority": 0,
+  "attempt": 0,
+  "createdAt": 1700000000000
 }
 ```
 
@@ -313,17 +363,32 @@ Key 네임스페이스 예시:
 
 ---
 
-## MainMQ Configuration (Draft)
+## MainMQ Configuration (Current + Draft)
 
 `MainMQ/main_mq_configuration.json`에서 Manager 설정 스키마를 정의합니다.
 
 * `schemaVersion`: 설정 스키마 버전
 * `backend`: `sqlite` 또는 `filesystem`
+* `mode`: `mailbox_sqlite` | `mailbox_fs` | `hybrid`
 * `paths`: data/log 루트 경로
+* `ipc`: Mailbox IPC 설정 (요청/응답 폴더, 타임아웃 등)
 * `sqlite`: DB 경로, KV/인덱스 테이블명, 스키마 경로, WAL 관련 옵션
 * `filesystem`: FS 루트 및 상태 폴더 구성
+* `hybrid`: payload 저장 경로 및 정합성 옵션
 * `policyDefaults`: 전역 기본 정책
 * `queues`: 큐별 정책 오버라이드
+
+현재 `MainMQ/main.cpp`와 `QueueManager`에서 실제로 사용하는 필드:
+
+* `backend` (현재 sqlite만 지원)
+* `paths.logRoot`
+* `sqlite.dbPath`, `sqlite.kvTable`, `sqlite.messageIndexTable`
+* `sqlite.busyTimeoutMs`, `sqlite.journalMode`, `sqlite.synchronous`
+* `lease.visibilityTimeoutSec`, `lease.sweepIntervalMs`
+* `policyDefaults`, `queues` (QueueManager 등록 및 정책 저장)
+
+`sqlite.schemaPath`는 현재 `Configurations`에서 미사용입니다.
+`filesystem`/`ipc`/`hybrid`는 파싱되지만 백엔드/IPC가 미구현 상태입니다.
 
 ---
 
@@ -365,31 +430,70 @@ DLQ는 다음과 같은 상황에 사용합니다.
 
 ---
 
-## CLI (Planned)
+## CLI (Current + Planned)
 
-초기 목표는 백엔드가 달라도 동일한 커맨드 사용성을 제공하는 것입니다.
+### MQCLI (Current, SQLite direct)
 
-예시(스펙 제안):
+현재 SQLite 백엔드를 직접 사용하는 테스트용 CLI가 제공됩니다.
+`Samples/MQCLI`에서 빌드되며, Manager API/IPC 없이 DB에 직접 접근합니다.
 
 ```bash
 # publish
-yirangmq publish --backend fs --queue telemetry --file message.json
-yirangmq publish --backend sqlite --db /data/yirang.db --queue telemetry --file message.json
+./build/out/MQCLI publish --queue telemetry --message '{"temp":36.5,"rpm":1200}' --priority 5
 
-# consume (run consumer main process)
-yirangmq consume --backend fs --queue telemetry --path /var/yirang/queues
-yirangmq consume --backend sqlite --db /data/yirang.db --queue telemetry
+# consume
+./build/out/MQCLI consume --queue telemetry --consumer-id consumer-01 --timeout 30
 
 # status
-yirangmq status --backend fs --queue telemetry
-yirangmq status --backend sqlite --queue telemetry
+./build/out/MQCLI status --queue telemetry
 
-# dlq operations
-yirangmq dlq list --backend sqlite --queue telemetry-dlq
-yirangmq dlq requeue --backend fs --queue telemetry-dlq --filter reasonCode=TIMEOUT
+# ack / nack
+./build/out/MQCLI ack --message-key <message-key>
+./build/out/MQCLI nack --message-key <message-key> --reason "error" --requeue
 ```
 
-> 실제 옵션/명령은 구현에 따라 조정될 수 있습니다.
+테스트 스크립트: `test_mq.sh`
+
+### yirangmq (Mailbox Client)
+
+Mailbox IPC를 통해 MainMQ에 요청/응답하는 클라이언트입니다.
+MainMQ가 반드시 실행 중이어야 합니다.
+
+```bash
+# MainMQ 시작 (백그라운드)
+./build/out/MainMQ &
+
+# Health 체크
+./build/out/yirangmq health
+
+# 메시지 발행
+./build/out/yirangmq publish --queue telemetry --message '{"temp":36.5}'
+
+# 메시지 소비
+./build/out/yirangmq consume --queue telemetry --consumer-id consumer-01
+
+# ACK
+./build/out/yirangmq ack --message-key "msg:telemetry:xxx" --lease-id "xxx"
+
+# NACK (requeue)
+./build/out/yirangmq nack --message-key "msg:telemetry:xxx" --lease-id "xxx" --reason "error" --requeue
+
+# 큐 상태 확인
+./build/out/yirangmq status --queue telemetry
+
+# Mailbox 메트릭
+./build/out/yirangmq metrics
+
+# DLQ 목록 조회
+./build/out/yirangmq list-dlq --queue telemetry --limit 50
+
+# DLQ 재처리
+./build/out/yirangmq reprocess --message-key "msg:telemetry:xxx"
+```
+
+옵션:
+* `--ipc-root`: IPC 루트 폴더 경로 (기본값: `./ipc`)
+* `--timeout`: 응답 대기 타임아웃 (ms, 기본값: 30000)
 
 ---
 
@@ -413,29 +517,63 @@ yirangmq dlq requeue --backend fs --queue telemetry-dlq --filter reasonCode=TIME
 
 ---
 
-## Roadmap (Suggested)
+## Implementation Status (Current)
 
-* [ ] Backend abstraction (FS/SQLite Adapter)
-* [ ] JSON Envelope + schema validation
-* [ ] Lease (visibility timeout) + crash recovery
-* [ ] Retry policy + DLQ + requeue
-* [ ] ConsumerCLI 운영 기능(status/pause/resume/drain)
-* [ ] Metrics/Health output
+### Core Components
+* **Mailbox IPC**: 완전 구현 - 요청/응답 폴더 기반 IPC, 핸들러, atomic write/rename
+* **SQLite backend**: 완전 구현 - enqueue/lease_next/ack/nack/extend_lease + policy load/save + metrics + lease/delayed 처리
+* **FileSystem backend**: 완전 구현 - 파일 기반 메시지 저장, 상태 전이, lease sweep, delayed sweep
+* **Hybrid backend**: 완전 구현 - SQLite index + File payload, 정합성 체크 및 복구 루틴
+* **MainMQ**: 완전 구현 - Configurations 로드/검증, 큐 등록, QueueManager 실행, 시그널 처리
+* **QueueManager**: 완전 구현 - lease sweep + delayed sweep + retry/DLQ 오케스트레이션
+
+### Client Tools
+* **yirangmq CLI**: 완전 구현 - Mailbox 기반 클라이언트 (publish/consume/ack/nack/status/health/metrics/list-dlq/reprocess)
+* **MQCLI**: 유지 - SQLite 직접 접근 CLI (테스트용)
+
+### Observability
+* **Metrics**: queue별 ready/inflight/delayed/dlq 카운트, Mailbox 처리량/오류 메트릭
+* **Health**: health 명령으로 서비스 상태 확인
+* **DLQ 관리**: list-dlq/reprocess 명령으로 DLQ 조회 및 재처리
+
+### Testing
+* **SQLite 모드**: 통합 테스트 완료 (`test_mailbox.sh`)
+* **FileSystem 모드**: 통합 테스트 완료 (`test_all_modes.sh`)
+* **Hybrid 모드**: 통합 테스트 완료 (`test_all_modes.sh`)
+
+---
+
+## Roadmap
+
+### Completed
+* [x] Mailbox IPC (요청/응답 폴더, 핸들러, client)
+* [x] Backend abstraction (interface + SQLite/FileSystem/Hybrid adapters)
+* [x] Lease (visibility timeout) + crash recovery
+* [x] Retry policy + DLQ + requeue
+* [x] yirangmq CLI (Mailbox 기반 클라이언트)
+* [x] Metrics/Health output (adapter metrics + Mailbox metrics)
+* [x] All backend modes integration tests
+
+### Remaining
+* [ ] JSON Envelope + schema validation (MessageValidator 연결 부분 구현)
+* [ ] Mailbox IPC 단위 테스트 (schema/timeout)
 * [ ] Stress & fault tests (kill -9, reboot/power-loss scenarios)
-* [ ] Documentation: backend 선택 가이드, 운영 매뉴얼
+* [ ] Documentation: 운영 매뉴얼, 장애 대응 가이드
 
-### MainMQ Implementation Roadmap (Draft)
+### MainMQ Implementation Status
 
 MainMQ는 Manager Process로서 큐/정책/백엔드를 오케스트레이션합니다.
 
-1. 설정 스키마 확정 + 로더 구현 (backend 선택, 경로/DB, 정책 기본값)
-2. 도메인 모델 정의 (Queue, Message, Policy, Lease, Retry, DLQ) 및 상태 전이 규칙
-3. Backend Adapter 인터페이스 설계 (enqueue/lease/ack/nack, metrics)
-4. SQLite Adapter 1차 구현: KV 테이블 + 상태/큐 인덱스 + 트랜잭션 경계
-5. Lease/Retry/DLQ 스케줄러 구현 (timeout 회수, backoff 재스케줄)
-6. Manager API/IPC 최소 구현 + CLI 연동 (publish/consume-next/status)
-7. 관측/로그/메트릭 출력 + 복구 시나리오 검증
-8. FileSystem Adapter 추가 + 교체 테스트
+1. [x] 설정 스키마 확정 + 로더 구현 (`Configurations` 연동/검증)
+2. [x] 도메인 모델 정의 (`BackendAdapter.h` 구조체 정의)
+3. [x] Backend Adapter 인터페이스 설계
+4. [x] SQLite Adapter 구현: KV 테이블 + 상태/큐 인덱스 + 트랜잭션 경계
+5. [x] Mailbox IPC 계층 구현 (요청/응답 폴더, 핸들러, 타임아웃/재처리)
+6. [x] Manager API/IPC + yirangmq CLI 연동
+7. [x] Lease/Retry/DLQ 스케줄러 구현 (lease/delayed sweep, retry/dlq 오케스트레이션)
+8. [x] 관측/로그/메트릭 출력
+9. [x] FileSystem Adapter 구현
+10. [x] Hybrid Adapter 구현 + 정합성 체크/복구
 
 ---
 

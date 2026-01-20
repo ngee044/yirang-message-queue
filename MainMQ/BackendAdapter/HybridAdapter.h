@@ -7,11 +7,12 @@
 #include <mutex>
 #include <string>
 
-class SQLiteAdapter : public BackendAdapter
+// Hybrid Backend: Payload stored in files, state/index in SQLite
+class HybridAdapter : public BackendAdapter
 {
 public:
-	SQLiteAdapter(const std::string& schema_path);
-	~SQLiteAdapter(void) override;
+	HybridAdapter(const std::string& schema_path);
+	~HybridAdapter(void) override;
 
 	auto open(const BackendConfig& config) -> std::tuple<bool, std::optional<std::string>> override;
 	auto close(void) -> void override;
@@ -40,14 +41,47 @@ public:
 	auto list_dlq_messages(const std::string& queue, int32_t limit) -> std::tuple<std::vector<DlqMessageInfo>, std::optional<std::string>> override;
 	auto reprocess_dlq_message(const std::string& message_key) -> std::tuple<bool, std::optional<std::string>> override;
 
+	// Consistency check and repair
+	auto check_consistency(const std::string& queue = "")
+		-> std::tuple<ConsistencyReport, std::optional<std::string>> override;
+	auto repair_consistency(const ConsistencyReport& report)
+		-> std::tuple<int32_t, std::optional<std::string>> override;
+
 private:
+	// Database operations
 	auto apply_pragmas(void) -> std::tuple<bool, std::optional<std::string>>;
 	auto ensure_schema(void) -> std::tuple<bool, std::optional<std::string>>;
 	auto load_schema_sql(void) -> std::tuple<std::optional<std::string>, std::optional<std::string>>;
 
+	// File operations for payload
+	auto ensure_payload_directories(const std::string& queue) -> std::tuple<bool, std::optional<std::string>>;
+	auto build_payload_path(const std::string& queue, const std::string& message_id) -> std::string;
+	auto build_archive_path(const std::string& queue, const std::string& message_id) -> std::string;
+	auto build_dlq_path(const std::string& queue, const std::string& message_id) -> std::string;
+
+	auto write_payload(const std::string& queue, const std::string& message_id, const std::string& payload) -> std::tuple<bool, std::optional<std::string>>;
+	auto read_payload(const std::string& queue, const std::string& message_id) -> std::tuple<std::optional<std::string>, std::optional<std::string>>;
+	auto move_payload_to_archive(const std::string& queue, const std::string& message_id) -> std::tuple<bool, std::optional<std::string>>;
+	auto move_payload_to_dlq(const std::string& queue, const std::string& message_id) -> std::tuple<bool, std::optional<std::string>>;
+
+	auto atomic_write(const std::string& target_path, const std::string& content) -> std::tuple<bool, std::optional<std::string>>;
+
+	// Utilities
+	auto current_time_ms(void) -> int64_t;
+	auto extract_message_id_from_key(const std::string& message_key) -> std::string;
+	auto extract_queue_from_key(const std::string& message_key) -> std::string;
+
+	// Consistency helpers
+	auto get_all_queues(void) -> std::vector<std::string>;
+	auto list_payload_files(const std::string& queue, const std::string& subdir)
+		-> std::tuple<std::vector<std::string>, std::optional<std::string>>;
+	auto get_indexed_message_ids(const std::string& queue, const std::string& state)
+		-> std::tuple<std::vector<std::string>, std::optional<std::string>>;
+
 private:
 	bool is_open_;
 	std::string schema_path_;
+	std::string payload_root_;
 	SQLiteConfig sqlite_config_;
 	DataBase::SQLite db_;
 	mutable std::mutex db_mutex_;

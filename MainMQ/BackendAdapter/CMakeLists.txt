@@ -8,10 +8,14 @@ find_package(unofficial-sqlite3 CONFIG REQUIRED)
 set(HEADER_FILES
 	BackendAdapter.h
 	SQLiteAdapter.h
+	FileSystemAdapter.h
+	HybridAdapter.h
 )
 
 set(SOURCE_FILES
 	SQLiteAdapter.cpp
+	FileSystemAdapter.cpp
+	HybridAdapter.cpp
 )
 
 add_library(${LIBRARY_NAME} ${HEADER_FILES} ${SOURCE_FILES})

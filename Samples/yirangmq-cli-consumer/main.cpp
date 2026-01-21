@@ -121,16 +121,18 @@ auto send_request(const MailboxConfig& config, const std::string& client_id, con
 auto print_usage() -> void
 {
 	Logger::handle().write(LogTypes::Information, R"(
-Yi-Rang MQ Consumer Client (yirangmq-consumer)
+Yi-Rang MQ Consumer Client (yirangmq-cli-consumer)
 
-Usage: yirangmq-consumer <command> [options]
+Usage: yirangmq-cli-consumer [command] [options]
 
 Commands:
+  (default)    Consume next message (when no command specified)
   consume      Consume next message from a queue
   ack          Acknowledge a message
   nack         Negative acknowledge a message
   list-dlq     List messages in dead letter queue
   reprocess    Reprocess a DLQ message
+  help         Show this help message
 
 Global Options:
   --ipc-root <path>     IPC root directory (default: ./ipc)
@@ -173,12 +175,12 @@ Configuration File (consumer_configuration.json):
   }
 
 Examples:
-  yirangmq-consumer consume --queue telemetry
-  yirangmq-consumer consume  # uses queue and consumer-id from config
-  yirangmq-consumer ack --message-key msg:telemetry:abc123
-  yirangmq-consumer nack --message-key msg:telemetry:abc123 --reason "error" --requeue
-  yirangmq-consumer list-dlq --queue telemetry --limit 50
-  yirangmq-consumer reprocess --message-key msg:telemetry:abc123
+  yirangmq-cli-consumer                # consume using config defaults
+  yirangmq-cli-consumer consume --queue telemetry
+  yirangmq-cli-consumer ack --message-key msg:telemetry:abc123
+  yirangmq-cli-consumer nack --message-key msg:telemetry:abc123 --reason "error" --requeue
+  yirangmq-cli-consumer list-dlq --queue telemetry --limit 50
+  yirangmq-cli-consumer reprocess --message-key msg:telemetry:abc123
 )");
 }
 
@@ -459,18 +461,15 @@ auto main(int argc, char* argv[]) -> int
 	// Re-parse args for command
 	ArgumentParser cmd_args(argc, argv);
 
-	if (argc < 2 || cmd_args.to_string("--help").has_value() || cmd_args.to_string("-h").has_value())
-	{
-		print_usage();
-		Logger::handle().stop();
-		return 0;
-	}
-
-	// Get command
-	std::string command = argv[1];
+	// Get command (default to "consume" if not specified)
+	std::string command = (argc >= 2) ? argv[1] : "consume";
 	int result = 0;
 
-	if (command == "consume")
+	if (command == "help" || command == "--help" || command == "-h")
+	{
+		print_usage();
+	}
+	else if (command == "consume")
 	{
 		result = cmd_consume(cmd_args, config);
 	}

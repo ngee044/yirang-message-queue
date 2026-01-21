@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <format>
 
+using namespace Utilities;
 using json = nlohmann::json;
 
 Configurations::Configurations(ArgumentParser&& arguments)
@@ -34,7 +35,7 @@ Configurations::Configurations(ArgumentParser&& arguments)
 	// Generate consumer ID if not specified
 	if (consumer_id_.empty())
 	{
-		consumer_id_ = std::format("consumer-{}", Utilities::Generator::guid().substr(0, 8));
+		consumer_id_ = std::format("consumer-{}", Generator::guid().substr(0, 8));
 	}
 }
 
@@ -67,7 +68,7 @@ auto Configurations::load() -> void
 		}
 	}
 
-	Utilities::File source;
+	File source;
 	auto [opened, open_error] = source.open(path.string(), std::ios::in | std::ios::binary);
 	if (!opened)
 	{
@@ -84,7 +85,7 @@ auto Configurations::load() -> void
 
 	try
 	{
-		json config = json::parse(Utilities::Converter::to_string(source_data.value()));
+		json config = json::parse(Converter::to_string(source_data.value()));
 
 		// IPC (Mailbox) config
 		if (config.contains("ipc") && config["ipc"].is_object())

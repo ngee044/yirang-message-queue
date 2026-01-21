@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-set(PROGRAM_NAME yirangmq-publisher)
+set(PROGRAM_NAME yirangmq-cli-publisher)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED TRUE)
 

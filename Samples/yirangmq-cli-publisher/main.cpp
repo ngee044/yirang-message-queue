@@ -121,15 +121,17 @@ auto send_request(const MailboxConfig& config, const std::string& client_id, con
 auto print_usage() -> void
 {
 	Logger::handle().write(LogTypes::Information, R"(
-Yi-Rang MQ Publisher Client (yirangmq-publisher)
+Yi-Rang MQ Publisher Client (yirangmq-cli-publisher)
 
-Usage: yirangmq-publisher <command> [options]
+Usage: yirangmq-cli-publisher [command] [options]
 
 Commands:
+  (default)    Publish a message (when no command specified)
   publish      Publish a message to a queue
   status       Get queue status
   health       Check server health
   metrics      Get server metrics
+  help         Show this help message
 
 Global Options:
   --ipc-root <path>     IPC root directory (default: ./ipc)
@@ -168,12 +170,11 @@ Configuration File (publisher_configuration.json):
   }
 
 Examples:
-  yirangmq-publisher publish --queue telemetry --message '{"temp":36.5}'
-  yirangmq-publisher publish --message '{"temp":36.5}'  # uses queue from config
-  yirangmq-publisher publish --queue telemetry --message '{"temp":36.5}' --target worker-01
-  yirangmq-publisher status --queue telemetry
-  yirangmq-publisher health
-  yirangmq-publisher metrics
+  yirangmq-cli-publisher --message '{"temp":36.5}'
+  yirangmq-cli-publisher --message '{"temp":36.5}' --target worker-01
+  yirangmq-cli-publisher status --queue telemetry
+  yirangmq-cli-publisher health
+  yirangmq-cli-publisher metrics
 )");
 }
 
@@ -389,18 +390,26 @@ auto main(int argc, char* argv[]) -> int
 	// Re-parse args for command
 	ArgumentParser cmd_args(argc, argv);
 
-	if (argc < 2 || cmd_args.to_string("--help").has_value() || cmd_args.to_string("-h").has_value())
+	// Determine command: check if first arg is a known command or default to "publish"
+	std::string command = "publish";
+	if (argc >= 2)
 	{
-		print_usage();
-		Logger::handle().stop();
-		return 0;
+		std::string first_arg = argv[1];
+		if (first_arg == "publish" || first_arg == "status" || first_arg == "health" ||
+		    first_arg == "metrics" || first_arg == "help" || first_arg == "--help" || first_arg == "-h")
+		{
+			command = first_arg;
+		}
+		// Otherwise, assume it's an option like --message and default to publish
 	}
 
-	// Get command
-	std::string command = argv[1];
 	int result = 0;
 
-	if (command == "publish")
+	if (command == "help" || command == "--help" || command == "-h")
+	{
+		print_usage();
+	}
+	else if (command == "publish")
 	{
 		result = cmd_publish(cmd_args, config);
 	}
@@ -415,12 +424,6 @@ auto main(int argc, char* argv[]) -> int
 	else if (command == "metrics")
 	{
 		result = cmd_metrics(config);
-	}
-	else
-	{
-		Logger::handle().write(LogTypes::Error, std::format("Unknown command: {}", command));
-		print_usage();
-		result = 1;
 	}
 
 	Logger::handle().stop();

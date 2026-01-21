@@ -60,6 +60,9 @@ logs/
 .codexignore
 .cursorignore
 CLAUDE.md
+docs/
+ipc_fault_test/
+data_fault_test/
 
 
 # Temporary files
@@ -71,3 +74,4 @@ build/
 dist/
 .cache/
 .env
+

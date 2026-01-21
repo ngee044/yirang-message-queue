@@ -1,0 +1,78 @@
+services:
+  # ============================================================
+  # Yi-Rang MQ Service
+  # ============================================================
+  yirangmq:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: yirangmq:latest
+    container_name: yirangmq
+    restart: unless-stopped
+
+    # Environment variables (override config)
+    environment:
+      - YIRANGMQ_BACKEND=sqlite
+      - YIRANGMQ_LOG_LEVEL=Information
+
+    # Volume mounts
+    volumes:
+      # Data persistence
+      - yirangmq-data:/app/data
+      # Log files
+      - yirangmq-logs:/app/logs
+      # IPC directory (for inter-container communication)
+      - yirangmq-ipc:/app/ipc
+      # Custom config (optional)
+      - ./config:/app/config:ro
+
+    # Health check
+    healthcheck:
+      test: ["CMD", "/app/yirangmq-cli", "health", "--timeout", "5"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+    # Logging
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ============================================================
+  # CLI Tool (for testing/debugging)
+  # ============================================================
+  yirangmq-cli:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: yirangmq:latest
+    container_name: yirangmq-cli
+    profiles:
+      - tools
+
+    # Share IPC volume with main service
+    volumes:
+      - yirangmq-ipc:/app/ipc
+
+    # Interactive mode
+    stdin_open: true
+    tty: true
+
+    # Override entrypoint for CLI usage
+    entrypoint: ["/bin/bash"]
+
+    # Depend on main service
+    depends_on:
+      yirangmq:
+        condition: service_healthy
+
+volumes:
+  yirangmq-data:
+    name: yirangmq-data
+  yirangmq-logs:
+    name: yirangmq-logs
+  yirangmq-ipc:
+    name: yirangmq-ipc

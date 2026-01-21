@@ -1,0 +1,30 @@
+# Build artifacts
+build/
+cmake-build-*/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Git
+.git/
+.gitignore
+
+# Docker
+docker/
+
+# Data & logs (runtime)
+data/
+logs/
+ipc/
+
+# Test artifacts
+*.db
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db

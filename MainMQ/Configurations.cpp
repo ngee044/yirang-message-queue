@@ -317,6 +317,10 @@ namespace
 					{
 						mailbox_config_.poll_interval_ms = ipc["pollIntervalMs"].get<int32_t>();
 					}
+					if (ipc.contains("useFolderWatcher") && ipc["useFolderWatcher"].is_boolean())
+					{
+						mailbox_config_.use_folder_watcher = ipc["useFolderWatcher"].get<bool>();
+					}
 				}
 
 				// Lease config

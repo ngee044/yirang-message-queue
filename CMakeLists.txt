@@ -26,9 +26,17 @@ project(${PROJECT_NAME} VERSION 1.0.0.0)
 
 find_package(Threads REQUIRED)
 
+option(BUILD_TESTS "Build unit tests" ON)
+
 add_subdirectory(CommonLibrary)
 add_subdirectory(MainMQ)
 
 # Samples
 add_subdirectory(Samples)
 #add_subdirectory(ExampleProject)
+
+# Tests
+if(BUILD_TESTS)
+	enable_testing()
+	add_subdirectory(Tests)
+endif()

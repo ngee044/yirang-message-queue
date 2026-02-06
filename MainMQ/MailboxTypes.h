@@ -15,6 +15,7 @@ struct MailboxConfig
 	std::string dead_dir = "dead";
 	int32_t stale_timeout_ms = 30000;
 	int32_t poll_interval_ms = 100;
+	bool use_folder_watcher = true;
 };
 
 // Mailbox command types

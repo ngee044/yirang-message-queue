@@ -3,7 +3,8 @@
         "lz4",
         "efsw",
         "sqlite3",
-        "nlohmann-json" 
+        "nlohmann-json",
+        "gtest"
 	]
 }
 

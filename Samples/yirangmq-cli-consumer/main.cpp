@@ -130,6 +130,7 @@ Commands:
   consume      Consume next message from a queue
   ack          Acknowledge a message
   nack         Negative acknowledge a message
+  extend-lease Extend visibility timeout for a leased message
   list-dlq     List messages in dead letter queue
   reprocess    Reprocess a DLQ message
   help         Show this help message
@@ -148,6 +149,11 @@ Ack/Nack Options:
   --lease-id <id>       Lease ID
   --reason <text>       Reason for nack
   --requeue             Requeue message on nack (default: false)
+
+Extend Lease Options:
+  --message-key <key>   Message key (required)
+  --lease-id <id>       Lease ID
+  --visibility <sec>    New visibility timeout in seconds (default: 30)
 
 DLQ Options:
   --queue <name>        Queue name (required for list-dlq, or set in config)
@@ -180,6 +186,7 @@ Examples:
   yirangmq-cli-consumer ack --message-key msg:telemetry:abc123
   yirangmq-cli-consumer nack --message-key msg:telemetry:abc123 --reason "error" --requeue
   yirangmq-cli-consumer list-dlq --queue telemetry --limit 50
+  yirangmq-cli-consumer extend-lease --message-key msg:telemetry:abc123 --lease-id <id> --visibility 60
   yirangmq-cli-consumer reprocess --message-key msg:telemetry:abc123
 )");
 }
@@ -346,6 +353,58 @@ auto cmd_nack(ArgumentParser& args, Configurations& config) -> int
 	}
 }
 
+auto cmd_extend_lease(ArgumentParser& args, Configurations& config) -> int
+{
+	auto message_key = args.to_string("--message-key");
+	auto lease_id = args.to_string("--lease-id");
+	auto visibility = args.to_int("--visibility");
+
+	if (!message_key.has_value())
+	{
+		Logger::handle().write(LogTypes::Error, "--message-key is required");
+		return 1;
+	}
+
+	json payload;
+	payload["messageKey"] = message_key.value();
+	if (lease_id.has_value())
+	{
+		payload["leaseId"] = lease_id.value();
+	}
+	payload["consumerId"] = config.consumer_id();
+	payload["visibilityTimeoutSec"] = visibility.value_or(config.visibility_timeout_sec());
+
+	auto [ok, response] = send_request(
+		config.mailbox_config(),
+		config.consumer_id(),
+		"extend_lease",
+		payload,
+		config.timeout_ms()
+	);
+
+	if (!ok)
+	{
+		Logger::handle().write(LogTypes::Error, std::format("Request failed: {}", response.dump(2)));
+		return 1;
+	}
+
+	if (response.value("ok", false))
+	{
+		Logger::handle().write(LogTypes::Information, "Lease extended successfully");
+		return 0;
+	}
+	else
+	{
+		std::string error_msg = "Extend lease failed";
+		if (response.contains("error"))
+		{
+			error_msg += ": " + response["error"].dump();
+		}
+		Logger::handle().write(LogTypes::Error, error_msg);
+		return 1;
+	}
+}
+
 auto cmd_list_dlq(ArgumentParser& args, Configurations& config) -> int
 {
 	auto limit = args.to_int("--limit");
@@ -480,6 +539,10 @@ auto main(int argc, char* argv[]) -> int
 	else if (command == "nack")
 	{
 		result = cmd_nack(cmd_args, config);
+	}
+	else if (command == "extend-lease" || command == "extend" || command == "extendlease")
+	{
+		result = cmd_extend_lease(cmd_args, config);
 	}
 	else if (command == "list-dlq" || command == "listdlq" || command == "dlq")
 	{

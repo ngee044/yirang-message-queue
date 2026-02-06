@@ -12,6 +12,8 @@ NC='\033[0m' # No Color
 BUILD_TYPE="Release"
 BUILD_DIR="build"
 CLEAN_BUILD=false
+BUILD_TESTS=true
+RUN_TESTS=false
 JOBS=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
 
 # vcpkg paths to search
@@ -42,6 +44,8 @@ print_usage() {
     echo "  -c, --clean       Clean build (remove build directory before building)"
     echo "  -j, --jobs N      Number of parallel build jobs (default: $JOBS)"
     echo "  -v, --vcpkg PATH  Specify vcpkg root directory path"
+    echo "  -t, --no-tests    Disable building tests"
+    echo "      --test        Run tests after build"
     echo "  -h, --help        Show this help message and exit"
     echo ""
     echo "EXAMPLES:"
@@ -114,6 +118,14 @@ while [[ $# -gt 0 ]]; do
             JOBS="$2"
             shift 2
             ;;
+        -t|--no-tests)
+            BUILD_TESTS=false
+            shift
+            ;;
+        --test)
+            RUN_TESTS=true
+            shift
+            ;;
         -v|--vcpkg)
             VCPKG_ROOT="$2"
             shift 2
@@ -158,10 +170,18 @@ mkdir -p "$BUILD_DIR"
 
 # Configure
 log_info "Configuring ($BUILD_TYPE)..."
-cmake -B "$BUILD_DIR" -S . \
-    -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
-    -DCMAKE_TOOLCHAIN_FILE="$VCPKG_TOOLCHAIN" \
+CMAKE_ARGS=(
+    -B "$BUILD_DIR" -S .
+    -DCMAKE_BUILD_TYPE="$BUILD_TYPE"
+    -DCMAKE_TOOLCHAIN_FILE="$VCPKG_TOOLCHAIN"
     -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+)
+
+if [[ "$BUILD_TESTS" == false ]]; then
+    CMAKE_ARGS+=(-DBUILD_TESTS=OFF)
+fi
+
+cmake "${CMAKE_ARGS[@]}"
 
 # Build
 log_info "Building with $JOBS jobs..."
@@ -170,6 +190,13 @@ cmake --build "$BUILD_DIR" --config "$BUILD_TYPE" -j "$JOBS"
 # Done
 log_info "Build complete!"
 log_info "Output directory: $BUILD_DIR/out"
+
+# Run tests if requested
+if [[ "$RUN_TESTS" == true && "$BUILD_TESTS" == true ]]; then
+    echo ""
+    log_info "Running tests..."
+    ctest --test-dir "$BUILD_DIR" --output-on-failure
+fi
 
 # List built executables
 if [[ -d "$BUILD_DIR/out" ]]; then

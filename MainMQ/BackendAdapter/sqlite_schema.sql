@@ -16,7 +16,10 @@ CREATE TABLE IF NOT EXISTS {{msg_index_table}} (
   available_at INTEGER NOT NULL,
   lease_until INTEGER,
   attempt INTEGER NOT NULL DEFAULT 0,
-  message_key TEXT NOT NULL REFERENCES {{kv_table}}(key) ON DELETE CASCADE
+  message_key TEXT NOT NULL REFERENCES {{kv_table}}(key) ON DELETE CASCADE,
+  target_consumer_id TEXT NOT NULL DEFAULT '',
+  dlq_reason TEXT,
+  dlq_at INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_msg_ready ON {{msg_index_table}}(queue, state, available_at, priority);

@@ -4,12 +4,10 @@ find_package(nlohmann_json CONFIG REQUIRED)
 
 add_subdirectory(BackendAdapter)
 
-set(PROGRAM_NAME MainMQ)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED TRUE)
 
-set(SOURCE_FILES
-	main.cpp
+set(LIB_SOURCE_FILES
 	Configurations.cpp
 	QueueManager.cpp
 	MessageValidator.cpp
@@ -24,18 +22,23 @@ set(HEADER_FILES
 	MailboxTypes.h
 )
 
-project(${PROGRAM_NAME} VERSION 1.0.0.0)
-
-add_executable(${PROGRAM_NAME} ${HEADER_FILES} ${SOURCE_FILES})
-
-target_link_libraries(${PROGRAM_NAME} PUBLIC
+# MainMQLib static library (everything except main.cpp)
+add_library(MainMQLib STATIC ${HEADER_FILES} ${LIB_SOURCE_FILES})
+target_link_libraries(MainMQLib PUBLIC
 	Utilities
 	DataBase
 	ThreadPool
 	BackendAdapter
 	nlohmann_json::nlohmann_json
 )
-target_include_directories(${PROGRAM_NAME} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_include_directories(MainMQLib PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+
+# MainMQ executable
+set(PROGRAM_NAME MainMQ)
+project(${PROGRAM_NAME} VERSION 1.0.0.0)
+
+add_executable(${PROGRAM_NAME} main.cpp)
+target_link_libraries(${PROGRAM_NAME} PRIVATE MainMQLib)
 
 set(RESOURCE_FILES
 	main_mq_configuration.json

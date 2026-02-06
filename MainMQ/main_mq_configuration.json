@@ -13,7 +13,8 @@
     "responsesDir": "responses",
     "deadDir": "dead",
     "staleTimeoutMs": 30000,
-    "pollIntervalMs": 100
+    "pollIntervalMs": 100,
+    "useFolderWatcher": true
   },
   "sqlite": {
     "dbPath": "./data/yirangmq.db",

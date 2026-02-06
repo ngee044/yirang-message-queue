@@ -1,0 +1,29 @@
+# Build artifacts
+build/
+cmake-build-*/
+
+# Version control
+.git/
+.gitignore
+.gitmodules
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Documentation
+*.md
+docs/
+LICENSE
+
+# Docker files (avoid recursive context)
+docker/
+
+# Test artifacts
+Tests/
+
+# Temporary files
+*.tmp
+*.log

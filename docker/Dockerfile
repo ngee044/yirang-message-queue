@@ -67,6 +67,9 @@ COPY --from=builder /app/build/out/yirangmq-cli-consumer /app/
 COPY --from=builder /app/build/out/*.json /app/
 COPY --from=builder /app/MainMQ/sqlite_schema.sql /app/
 
+# Disable FolderWatcher for Docker (volume mounts don't propagate fs events)
+RUN sed -i 's/"useFolderWatcher": true/"useFolderWatcher": false/' /app/main_mq_configuration.json
+
 # Set ownership
 RUN chown -R yirangmq:yirangmq /app
 

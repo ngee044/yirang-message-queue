@@ -34,11 +34,12 @@ print_usage() {
     echo "  queue-status  Get queue status"
     echo ""
     echo "Consumer Commands:"
-    echo "  consume   Consume a message from a queue"
-    echo "  ack       Acknowledge a message"
-    echo "  nack      Negative acknowledge a message"
-    echo "  list-dlq  List messages in dead letter queue"
-    echo "  reprocess Reprocess a DLQ message"
+    echo "  consume       Consume a message from a queue"
+    echo "  ack           Acknowledge a message"
+    echo "  nack          Negative acknowledge a message"
+    echo "  extend-lease  Extend visibility timeout for a leased message"
+    echo "  list-dlq      List messages in dead letter queue"
+    echo "  reprocess     Reprocess a DLQ message"
     echo ""
     echo "Interactive:"
     echo "  cli       Open CLI shell (interactive)"
@@ -51,6 +52,7 @@ print_usage() {
     echo "  $0 consume telemetry"
     echo "  $0 ack msg:telemetry:abc123"
     echo "  $0 nack msg:telemetry:abc123 --reason 'error' --requeue"
+    echo "  $0 extend-lease msg:telemetry:abc123 --lease-id <id> --visibility 60"
     echo "  $0 list-dlq telemetry"
     echo "  $0 reprocess msg:telemetry:abc123"
     echo "  $0 queue-status telemetry"
@@ -144,6 +146,17 @@ case "${1:-help}" in
         shift 2
         log_info "Nacking message: $MESSAGE_KEY"
         docker compose exec yirangmq /app/yirangmq-cli-consumer nack --message-key "$MESSAGE_KEY" "$@"
+        ;;
+
+    extend-lease)
+        MESSAGE_KEY="${2}"
+        if [ -z "$MESSAGE_KEY" ]; then
+            log_error "Usage: $0 extend-lease <message-key> [--lease-id <id>] [--visibility <sec>]"
+            exit 1
+        fi
+        shift 2
+        log_info "Extending lease for message: $MESSAGE_KEY"
+        docker compose exec yirangmq /app/yirangmq-cli-consumer extend-lease --message-key "$MESSAGE_KEY" "$@"
         ;;
 
     list-dlq)

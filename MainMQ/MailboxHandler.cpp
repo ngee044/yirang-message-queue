@@ -28,7 +28,7 @@ MailboxHandler::MailboxHandler(
 	, config_(config)
 	, backend_(backend)
 	, queue_manager_(queue_manager)
-	, use_folder_watcher_(true)
+	, use_folder_watcher_(config.use_folder_watcher)
 {
 	thread_pool_ = std::make_shared<Thread::ThreadPool>("MailboxHandler");
 }
@@ -458,7 +458,12 @@ auto MailboxHandler::stale_cleanup_worker(void) -> void
 		cleanup_stale_requests();
 		cleanup_stale_responses();
 
-		std::this_thread::sleep_for(std::chrono::seconds(10));
+		// Use condition variable so stop() can wake us immediately
+		std::unique_lock<std::mutex> lock(pending_mutex_);
+		pending_cv_.wait_for(lock, std::chrono::seconds(10), [this]()
+		{
+			return !running_.load();
+		});
 	}
 }
 
@@ -652,7 +657,7 @@ auto MailboxHandler::parse_command(const std::string& command_str) -> MailboxCom
 	{
 		return MailboxCommand::Publish;
 	}
-	else if (cmd == "consume_next" || cmd == "consumeNext" || cmd == "consume")
+	else if (cmd == "consume_next" || cmd == "consumenext" || cmd == "consume")
 	{
 		return MailboxCommand::ConsumeNext;
 	}
@@ -664,7 +669,7 @@ auto MailboxHandler::parse_command(const std::string& command_str) -> MailboxCom
 	{
 		return MailboxCommand::Nack;
 	}
-	else if (cmd == "extend_lease" || cmd == "extendLease" || cmd == "extend")
+	else if (cmd == "extend_lease" || cmd == "extendlease" || cmd == "extend")
 	{
 		return MailboxCommand::ExtendLease;
 	}

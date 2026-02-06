@@ -2,7 +2,7 @@
 
 #include "Job.h"
 #include "Logger.h"
-#include "SQLite.h"
+#include "ThreadWorker.h"
 
 #include <chrono>
 #include <cmath>
@@ -23,6 +23,19 @@ QueueManager::QueueManager(std::shared_ptr<BackendAdapter> backend, const QueueM
 			{
 				return { false, "already running" };
 			}
+
+			// Add ThreadWorkers for LongTerm jobs before starting the pool
+			auto lease_worker = std::make_shared<Thread::ThreadWorker>(
+				std::vector<Thread::JobPriorities>{ Thread::JobPriorities::LongTerm },
+				"QueueManagerLeaseWorker"
+			);
+			thread_pool_->push(lease_worker);
+
+			auto retry_worker = std::make_shared<Thread::ThreadWorker>(
+				std::vector<Thread::JobPriorities>{ Thread::JobPriorities::LongTerm },
+				"QueueManagerRetryWorker"
+			);
+			thread_pool_->push(retry_worker);
 
 			auto [started, start_error] = thread_pool_->start();
 			if (!started)

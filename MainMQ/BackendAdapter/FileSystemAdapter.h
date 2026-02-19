@@ -39,6 +39,8 @@ public:
 	auto list_dlq_messages(const std::string& queue, int32_t limit) -> std::tuple<std::vector<DlqMessageInfo>, std::optional<std::string>> override;
 	auto reprocess_dlq_message(const std::string& message_key) -> std::tuple<bool, std::optional<std::string>> override;
 
+	auto purge_expired_messages(void) -> std::tuple<int32_t, std::optional<std::string>> override;
+
 private:
 	// Directory structure
 	auto ensure_directories(void) -> std::tuple<bool, std::optional<std::string>>;

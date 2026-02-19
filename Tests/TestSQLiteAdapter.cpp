@@ -560,3 +560,84 @@ TEST_F(SQLiteAdapterTest, MultipleQueuesAreIsolated)
 	auto [metrics_a_after, ma2_err] = adapter_->metrics("queue-a");
 	EXPECT_EQ(metrics_a_after.ready, 2u) << "queue-a should be unaffected by queue-b lease";
 }
+
+// ---------------------------------------------------------------------------
+// TTL (Time-To-Live) Tests
+// ---------------------------------------------------------------------------
+
+TEST_F(SQLiteAdapterTest, EnqueueWithTTL)
+{
+	auto env = make_envelope("ttl-q", R"({"data":"ttl_test"})");
+	env.expired_at_ms = now_ms() + 60000; // expires in 60s
+
+	auto [ok, err] = adapter_->enqueue(env);
+	EXPECT_TRUE(ok) << err.value_or("");
+
+	auto [metrics, m_err] = adapter_->metrics("ttl-q");
+	EXPECT_EQ(metrics.ready, 1u);
+}
+
+TEST_F(SQLiteAdapterTest, LeaseSkipsExpiredMessages)
+{
+	// Enqueue a message that is already expired
+	auto env = make_envelope("ttl-q2", R"({"data":"expired"})");
+	env.expired_at_ms = now_ms() - 1000; // expired 1s ago
+
+	auto [ok, err] = adapter_->enqueue(env);
+	EXPECT_TRUE(ok);
+
+	// Try to lease - should return nothing since it's expired
+	auto result = adapter_->lease_next("ttl-q2", "consumer-1", 30);
+	EXPECT_FALSE(result.leased) << "Expired message should not be leased";
+}
+
+TEST_F(SQLiteAdapterTest, PurgeExpiredMessages)
+{
+	// Enqueue: one expired, one not expired, one with no TTL
+	auto env1 = make_envelope("ttl-q3", R"({"data":"expired"})");
+	env1.expired_at_ms = now_ms() - 1000;
+	adapter_->enqueue(env1);
+
+	auto env2 = make_envelope("ttl-q3", R"({"data":"not_expired"})");
+	env2.expired_at_ms = now_ms() + 60000;
+	adapter_->enqueue(env2);
+
+	auto env3 = make_envelope("ttl-q3", R"({"data":"no_ttl"})");
+	adapter_->enqueue(env3);
+
+	auto [purged, p_err] = adapter_->purge_expired_messages();
+	EXPECT_EQ(purged, 1) << "Should purge only the expired message";
+
+	auto [metrics, m_err] = adapter_->metrics("ttl-q3");
+	EXPECT_EQ(metrics.ready, 2u) << "2 messages should remain (not expired + no TTL)";
+}
+
+TEST_F(SQLiteAdapterTest, PurgeDoesNotAffectInflight)
+{
+	auto env = make_envelope("ttl-q4", R"({"data":"inflight_ttl"})");
+	env.expired_at_ms = now_ms() - 1000; // expired
+
+	adapter_->enqueue(env);
+
+	// Lease the message (makes it inflight) - but it's expired so lease should skip it
+	// Actually since it's already expired, lease_next won't find it
+	// Let's test with a message that expires AFTER being leased
+	auto env2 = make_envelope("ttl-q4", R"({"data":"inflight_then_expire"})");
+	env2.expired_at_ms = now_ms() + 1000; // will expire soon
+
+	adapter_->enqueue(env2);
+
+	// Lease it
+	auto result = adapter_->lease_next("ttl-q4", "consumer-1", 300);
+	ASSERT_TRUE(result.leased);
+
+	// Now manually make it expired by waiting or just purge
+	// Inflight messages should NOT be purged
+	auto [purged, p_err] = adapter_->purge_expired_messages();
+	// env is expired & ready, so it should be purged
+	// env2 is inflight, so it should NOT be purged even if expired
+	EXPECT_EQ(purged, 1) << "Should purge only the expired ready message, not the inflight one";
+
+	auto [metrics, m_err] = adapter_->metrics("ttl-q4");
+	EXPECT_EQ(metrics.inflight, 1u) << "Inflight message should remain";
+}

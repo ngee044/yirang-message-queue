@@ -76,6 +76,7 @@ namespace
 
 			// Policy defaults
 			policy_defaults_.visibility_timeout_sec = 30;
+			policy_defaults_.ttl_sec = 0;
 			policy_defaults_.retry.limit = 5;
 			policy_defaults_.retry.backoff = "exponential";
 			policy_defaults_.retry.initial_delay_sec = 1;
@@ -501,6 +502,10 @@ namespace
 			{
 				policy.visibility_timeout_sec = obj["visibilityTimeoutSec"].get<int32_t>();
 			}
+			if (obj.contains("ttlSec") && obj["ttlSec"].is_number())
+			{
+				policy.ttl_sec = obj["ttlSec"].get<int32_t>();
+			}
 			if (obj.contains("retry") && obj["retry"].is_object())
 			{
 				policy.retry = load_retry_policy(&obj["retry"]);
@@ -608,6 +613,13 @@ namespace
 				Logger::handle().write(LogTypes::Information,
 					std::format("{}: visibilityTimeoutSec ({}) must be > 0, using 30", context, policy.visibility_timeout_sec));
 				policy.visibility_timeout_sec = 30;
+			}
+
+			if (policy.ttl_sec < 0)
+			{
+				Logger::handle().write(LogTypes::Information,
+					std::format("{}: ttlSec ({}) must be >= 0, using 0 (disabled)", context, policy.ttl_sec));
+				policy.ttl_sec = 0;
 			}
 
 			validate_retry_policy(policy.retry, context);

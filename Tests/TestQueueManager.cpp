@@ -182,10 +182,24 @@ public:
 		return { true, std::nullopt };
 	}
 
+	auto purge_expired_messages(void)
+		-> std::tuple<int32_t, std::optional<std::string>> override
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		purge_expired_call_count_++;
+		return { 0, std::nullopt };
+	}
+
 	auto get_process_delayed_call_count(void) -> int32_t
 	{
 		std::lock_guard<std::mutex> lock(mutex_);
 		return process_delayed_call_count_;
+	}
+
+	auto get_purge_expired_call_count(void) -> int32_t
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		return purge_expired_call_count_;
 	}
 
 private:
@@ -195,6 +209,7 @@ private:
 	std::vector<MoveToDlqRecord> move_to_dlq_calls_;
 	std::vector<ExpiredLeaseInfo> expired_inflight_messages_;
 	int32_t process_delayed_call_count_ = 0;
+	int32_t purge_expired_call_count_ = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -212,6 +227,7 @@ protected:
 		QueueManagerConfig config;
 		config.lease_sweep_interval_ms = 50;
 		config.retry_sweep_interval_ms = 50;
+		config.ttl_sweep_interval_ms = 50;
 		config_ = config;
 	}
 
@@ -794,4 +810,19 @@ TEST_F(QueueManagerTest, RetrySweepWorkerCallsProcessDelayed)
 
 	// Verify process_delayed_messages was called at least once
 	EXPECT_GE(mock_backend_->get_process_delayed_call_count(), 1);
+}
+
+TEST_F(QueueManagerTest, TTLSweepWorkerCallsPurge)
+{
+	queue_manager_ = create_manager();
+
+	auto [started, err] = queue_manager_->start();
+	ASSERT_TRUE(started);
+
+	wait_for_sweep();
+
+	queue_manager_->stop();
+
+	// Verify purge_expired_messages was called at least once
+	EXPECT_GE(mock_backend_->get_purge_expired_call_count(), 1);
 }

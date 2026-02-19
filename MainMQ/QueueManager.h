@@ -14,6 +14,7 @@ struct QueueManagerConfig
 {
 	int32_t lease_sweep_interval_ms = 1000;
 	int32_t retry_sweep_interval_ms = 1000;
+	int32_t ttl_sweep_interval_ms = 5000;
 };
 
 class QueueManager
@@ -31,6 +32,7 @@ public:
 private:
 	auto lease_sweep_worker(void) -> void;
 	auto retry_sweep_worker(void) -> void;
+	auto ttl_sweep_worker(void) -> void;
 
 	auto recover_expired_leases(void) -> void;
 	auto process_delayed_messages(void) -> void;

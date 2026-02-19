@@ -762,6 +762,16 @@ auto MailboxHandler::handle_publish(const MailboxRequest& request) -> MailboxRes
 		int64_t delay_ms = payload.value("delayMs", static_cast<int64_t>(0));
 		envelope.available_at_ms = envelope.created_at_ms + delay_ms;
 
+		// Calculate TTL expiration from queue policy
+		if (queue_manager_)
+		{
+			auto policy_opt = queue_manager_->get_policy(envelope.queue);
+			if (policy_opt.has_value() && policy_opt->ttl_sec > 0)
+			{
+				envelope.expired_at_ms = envelope.created_at_ms + (static_cast<int64_t>(policy_opt->ttl_sec) * 1000);
+			}
+		}
+
 		// Validate message if schema is registered for this queue
 		if (validator_.has_schema(envelope.queue))
 		{

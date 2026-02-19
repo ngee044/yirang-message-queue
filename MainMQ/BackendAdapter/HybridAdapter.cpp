@@ -103,6 +103,12 @@ auto HybridAdapter::close(void) -> void
 
 auto HybridAdapter::apply_pragmas(void) -> std::tuple<bool, std::optional<std::string>>
 {
+	auto [fk_ok, fk_error] = db_.execute("PRAGMA foreign_keys = ON;");
+	if (!fk_ok)
+	{
+		return { false, std::format("failed to set foreign_keys: {}", fk_error.value_or("unknown")) };
+	}
+
 	std::string journal_pragma = std::format("PRAGMA journal_mode = {};", sqlite_config_.journal_mode);
 	auto [j_ok, j_error] = db_.execute(journal_pragma);
 	if (!j_ok)
@@ -239,16 +245,6 @@ auto HybridAdapter::enqueue(const MessageEnvelope& message) -> std::tuple<bool, 
 	}
 
 	auto payload_path = build_payload_path(message.queue, message.message_id);
-	json payload_json;
-	payload_json["payload"] = message.payload_json;
-	payload_json["attributes"] = message.attributes_json;
-
-	auto [write_ok, write_error] = atomic_write(payload_path, payload_json.dump(2));
-	if (!write_ok)
-	{
-		db_.rollback();
-		return { false, write_error };
-	}
 
 	json envelope;
 	envelope["messageId"] = message.message_id;
@@ -271,13 +267,12 @@ auto HybridAdapter::enqueue(const MessageEnvelope& message) -> std::tuple<bool, 
 	if (!kv_ok)
 	{
 		db_.rollback();
-		std::filesystem::remove(payload_path);
 		return { false, std::format("kv insert failed: {}", kv_error.value_or("unknown")) };
 	}
 
 	std::string insert_idx = std::format(
-		"INSERT INTO {} (queue, state, priority, available_at, lease_until, attempt, target_consumer_id, message_key) "
-		"VALUES ('{}', '{}', {}, {}, NULL, {}, '{}', '{}')",
+		"INSERT INTO {} (queue, state, priority, available_at, lease_until, attempt, target_consumer_id, message_key, expired_at) "
+		"VALUES ('{}', '{}', {}, {}, NULL, {}, '{}', '{}', {})",
 		sqlite_config_.message_index_table,
 		message.queue,
 		state,
@@ -285,15 +280,27 @@ auto HybridAdapter::enqueue(const MessageEnvelope& message) -> std::tuple<bool, 
 		message.available_at_ms,
 		message.attempt,
 		message.target_consumer_id,
-		message.key
+		message.key,
+		message.expired_at_ms
 	);
 
 	auto [idx_ok, idx_error] = db_.execute(insert_idx);
 	if (!idx_ok)
 	{
 		db_.rollback();
-		std::filesystem::remove(payload_path);
 		return { false, std::format("index insert failed: {}", idx_error.value_or("unknown")) };
+	}
+
+	// Write payload file AFTER successful SQLite inserts
+	json payload_json;
+	payload_json["payload"] = message.payload_json;
+	payload_json["attributes"] = message.attributes_json;
+
+	auto [write_ok, write_error] = atomic_write(payload_path, payload_json.dump(2));
+	if (!write_ok)
+	{
+		db_.rollback();
+		return { false, write_error };
 	}
 
 	auto [commit_ok, commit_error] = db_.commit();
@@ -336,11 +343,13 @@ auto HybridAdapter::lease_next(const std::string& queue, const std::string& cons
 		"SELECT message_key, attempt FROM {} "
 		"WHERE queue = '{}' AND state = 'ready' AND available_at <= {} "
 		"AND (target_consumer_id = '' OR target_consumer_id = '{}') "
+		"AND (expired_at = 0 OR expired_at > {}) "
 		"ORDER BY priority DESC, available_at ASC LIMIT 1",
 		sqlite_config_.message_index_table,
 		queue,
 		now,
-		consumer_id
+		consumer_id,
+		now
 	);
 
 	auto [query_result, query_error] = db_.query(select_sql);
@@ -495,7 +504,14 @@ auto HybridAdapter::ack(const LeaseToken& lease) -> std::tuple<bool, std::option
 	}
 
 	auto message_id = extract_message_id_from_key(lease.message_key);
-	move_payload_to_archive(queue, message_id);
+	auto [archive_ok, archive_error] = move_payload_to_archive(queue, message_id);
+	if (!archive_ok)
+	{
+		Utilities::Logger::handle().write(
+			Utilities::LogTypes::Error,
+			std::format("Failed to archive payload for {}: {}", lease.message_key, archive_error.value_or("unknown"))
+		);
+	}
 
 	return { true, std::nullopt };
 }
@@ -644,6 +660,7 @@ auto HybridAdapter::load_policy(const std::string& queue)
 
 		QueuePolicy policy;
 		policy.visibility_timeout_sec = j.value("visibilityTimeoutSec", 30);
+		policy.ttl_sec = j.value("ttlSec", 0);
 
 		if (j.contains("retry") && j["retry"].is_object())
 		{
@@ -687,6 +704,7 @@ auto HybridAdapter::save_policy(const std::string& queue, const QueuePolicy& pol
 
 	json j;
 	j["visibilityTimeoutSec"] = policy.visibility_timeout_sec;
+	j["ttlSec"] = policy.ttl_sec;
 	j["retry"] = {
 		{ "limit", policy.retry.limit },
 		{ "backoff", policy.retry.backoff },
@@ -1688,4 +1706,94 @@ auto HybridAdapter::repair_consistency(const ConsistencyReport& report)
 	);
 
 	return { repaired, std::nullopt };
+}
+
+auto HybridAdapter::purge_expired_messages(void) -> std::tuple<int32_t, std::optional<std::string>>
+{
+	std::lock_guard<std::mutex> lock(db_mutex_);
+
+	if (!is_open_)
+	{
+		return { 0, "adapter not open" };
+	}
+
+	auto now = current_time_ms();
+
+	auto [tx_ok, tx_error] = db_.begin_transaction();
+	if (!tx_ok)
+	{
+		return { 0, tx_error };
+	}
+
+	// Get expired message keys and their queues for payload file cleanup
+	std::string select_sql = std::format(
+		"SELECT message_key, queue FROM {} WHERE expired_at > 0 AND expired_at <= {} AND state IN ('ready', 'delayed')",
+		sqlite_config_.message_index_table,
+		now
+	);
+
+	auto [query_result, query_error] = db_.query(select_sql);
+	if (!query_result.has_value() || query_result->rows.empty())
+	{
+		db_.rollback();
+		return { 0, std::nullopt };
+	}
+
+	struct ExpiredInfo
+	{
+		std::string message_key;
+		std::string queue;
+	};
+
+	std::vector<ExpiredInfo> expired_list;
+	for (const auto& row : query_result->rows)
+	{
+		if (row.size() >= 2)
+		{
+			expired_list.push_back({ row[0], row[1] });
+		}
+	}
+
+	// Delete from msg_index
+	std::string delete_idx_sql = std::format(
+		"DELETE FROM {} WHERE expired_at > 0 AND expired_at <= {} AND state IN ('ready', 'delayed')",
+		sqlite_config_.message_index_table,
+		now
+	);
+
+	auto [del_ok, del_error] = db_.execute(delete_idx_sql);
+	if (!del_ok)
+	{
+		db_.rollback();
+		return { 0, del_error };
+	}
+
+	// Delete from kv table
+	for (const auto& info : expired_list)
+	{
+		std::string delete_kv_sql = std::format(
+			"DELETE FROM {} WHERE key = '{}'",
+			sqlite_config_.kv_table,
+			info.message_key
+		);
+		db_.execute(delete_kv_sql);
+	}
+
+	auto [commit_ok, commit_error] = db_.commit();
+	if (!commit_ok)
+	{
+		db_.rollback();
+		return { 0, commit_error };
+	}
+
+	// Delete payload files (outside transaction)
+	for (const auto& info : expired_list)
+	{
+		auto message_id = extract_message_id_from_key(info.message_key);
+		auto payload_path = build_payload_path(info.queue, message_id);
+		std::error_code ec;
+		std::filesystem::remove(payload_path, ec);
+	}
+
+	return { static_cast<int32_t>(expired_list.size()), std::nullopt };
 }

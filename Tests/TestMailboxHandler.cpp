@@ -232,6 +232,12 @@ public:
 		return { false, "mock reprocess failure" };
 	}
 
+	auto purge_expired_messages(void)
+		-> std::tuple<int32_t, std::optional<std::string>> override
+	{
+		return { 0, std::nullopt };
+	}
+
 private:
 	mutable std::mutex mutex_;
 	std::vector<EnqueueRecord> enqueue_calls_;

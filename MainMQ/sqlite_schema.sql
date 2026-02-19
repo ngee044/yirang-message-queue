@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS {{msg_index_table}} (
     dlq_at INTEGER,
     target_consumer_id TEXT NOT NULL DEFAULT '',
     message_key TEXT NOT NULL REFERENCES {{kv_table}}(key) ON DELETE CASCADE,
+    expired_at INTEGER DEFAULT 0,
     PRIMARY KEY (message_key)
 );
 
@@ -34,3 +35,4 @@ CREATE INDEX IF NOT EXISTS idx_msg_lease ON {{msg_index_table}}(state, lease_unt
 CREATE INDEX IF NOT EXISTS idx_msg_delayed ON {{msg_index_table}}(state, available_at) WHERE state = 'delayed';
 CREATE INDEX IF NOT EXISTS idx_msg_dlq ON {{msg_index_table}}(queue, state) WHERE state = 'dlq';
 CREATE INDEX IF NOT EXISTS idx_msg_target ON {{msg_index_table}}(queue, state, target_consumer_id, available_at) WHERE state = 'ready';
+CREATE INDEX IF NOT EXISTS idx_msg_expired ON {{msg_index_table}}(expired_at) WHERE expired_at > 0;

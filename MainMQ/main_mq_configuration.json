@@ -39,6 +39,7 @@
   },
   "policyDefaults": {
     "visibilityTimeoutSec": 30,
+    "ttlSec": 0,
     "retry": {
       "limit": 5,
       "backoff": "exponential",
@@ -56,6 +57,7 @@
       "name": "telemetry",
       "policy": {
         "visibilityTimeoutSec": 30,
+        "ttlSec": 0,
         "retry": {
           "limit": 5,
           "backoff": "exponential",

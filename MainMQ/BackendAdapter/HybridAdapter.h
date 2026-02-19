@@ -41,6 +41,8 @@ public:
 	auto list_dlq_messages(const std::string& queue, int32_t limit) -> std::tuple<std::vector<DlqMessageInfo>, std::optional<std::string>> override;
 	auto reprocess_dlq_message(const std::string& message_key) -> std::tuple<bool, std::optional<std::string>> override;
 
+	auto purge_expired_messages(void) -> std::tuple<int32_t, std::optional<std::string>> override;
+
 	// Consistency check and repair
 	auto check_consistency(const std::string& queue = "")
 		-> std::tuple<ConsistencyReport, std::optional<std::string>> override;

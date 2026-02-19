@@ -192,7 +192,7 @@ auto SQLiteAdapter::enqueue(const MessageEnvelope& message) -> std::tuple<bool, 
 
 	// Insert into msg_index table
 	std::string idx_sql = std::format(
-		"INSERT INTO {} (queue, state, priority, available_at, attempt, target_consumer_id, message_key) VALUES (?, ?, ?, ?, ?, ?, ?);",
+		"INSERT INTO {} (queue, state, priority, available_at, attempt, target_consumer_id, message_key, expired_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?);",
 		sqlite_config_.message_index_table
 	);
 
@@ -213,6 +213,7 @@ auto SQLiteAdapter::enqueue(const MessageEnvelope& message) -> std::tuple<bool, 
 	idx_stmt->bind_int(5, message.attempt);
 	idx_stmt->bind_text(6, message.target_consumer_id);
 	idx_stmt->bind_text(7, message.key);
+	idx_stmt->bind_int64(8, message.expired_at_ms);
 
 	if (idx_stmt->step() != SQLITE_DONE)
 	{
@@ -255,10 +256,12 @@ auto SQLiteAdapter::lease_next(const std::string& queue, const std::string& cons
 
 	// Find next ready message (priority DESC, available_at ASC)
 	// Filter by target_consumer_id: empty string matches any consumer, otherwise must match exactly
+	// Filter expired messages: skip messages where expired_at > 0 AND expired_at <= now
 	std::string select_sql = std::format(
 		"SELECT message_key, priority, attempt FROM {} "
 		"WHERE queue = ? AND state = 'ready' AND available_at <= ? "
 		"AND (target_consumer_id = '' OR target_consumer_id = ?) "
+		"AND (expired_at = 0 OR expired_at > ?) "
 		"ORDER BY priority DESC, available_at ASC LIMIT 1;",
 		sqlite_config_.message_index_table
 	);
@@ -274,6 +277,7 @@ auto SQLiteAdapter::lease_next(const std::string& queue, const std::string& cons
 	select_stmt->bind_text(1, queue);
 	select_stmt->bind_int64(2, now);
 	select_stmt->bind_text(3, consumer_id);
+	select_stmt->bind_int64(4, now);
 
 	int step_result = select_stmt->step();
 	if (step_result != SQLITE_ROW)
@@ -666,6 +670,7 @@ auto SQLiteAdapter::load_policy(const std::string& queue) -> std::tuple<std::opt
 
 		QueuePolicy policy;
 		policy.visibility_timeout_sec = policy_json.value("visibilityTimeoutSec", 30);
+		policy.ttl_sec = policy_json.value("ttlSec", 0);
 
 		if (policy_json.contains("retry"))
 		{
@@ -703,6 +708,7 @@ auto SQLiteAdapter::save_policy(const std::string& queue, const QueuePolicy& pol
 
 	json policy_json;
 	policy_json["visibilityTimeoutSec"] = policy.visibility_timeout_sec;
+	policy_json["ttlSec"] = policy.ttl_sec;
 
 	policy_json["retry"]["limit"] = policy.retry.limit;
 	policy_json["retry"]["backoff"] = policy.retry.backoff;
@@ -1318,4 +1324,95 @@ auto SQLiteAdapter::reprocess_dlq_message(const std::string& message_key)
 	}
 
 	return { true, std::nullopt };
+}
+
+auto SQLiteAdapter::purge_expired_messages(void) -> std::tuple<int32_t, std::optional<std::string>>
+{
+	std::lock_guard<std::mutex> lock(db_mutex_);
+
+	if (!db_.is_open())
+	{
+		return { 0, "database is not open" };
+	}
+
+	auto now = current_time_ms();
+
+	auto [tx_ok, tx_error] = db_.begin_transaction();
+	if (!tx_ok)
+	{
+		return { 0, tx_error };
+	}
+
+	// Get expired message keys for kv table cleanup
+	std::string select_sql = std::format(
+		"SELECT message_key FROM {} WHERE expired_at > 0 AND expired_at <= ? AND state IN ('ready', 'delayed');",
+		sqlite_config_.message_index_table
+	);
+
+	auto [select_stmt, select_error] = db_.prepare(select_sql);
+	if (!select_stmt)
+	{
+		db_.rollback();
+		return { 0, select_error };
+	}
+
+	select_stmt->bind_int64(1, now);
+
+	std::vector<std::string> expired_keys;
+	while (select_stmt->step() == SQLITE_ROW)
+	{
+		expired_keys.push_back(select_stmt->column_text(0));
+	}
+
+	if (expired_keys.empty())
+	{
+		db_.rollback();
+		return { 0, std::nullopt };
+	}
+
+	// Delete from msg_index
+	std::string delete_idx_sql = std::format(
+		"DELETE FROM {} WHERE expired_at > 0 AND expired_at <= ? AND state IN ('ready', 'delayed');",
+		sqlite_config_.message_index_table
+	);
+
+	auto [del_idx_stmt, del_idx_error] = db_.prepare(delete_idx_sql);
+	if (!del_idx_stmt)
+	{
+		db_.rollback();
+		return { 0, del_idx_error };
+	}
+
+	del_idx_stmt->bind_int64(1, now);
+
+	if (del_idx_stmt->step() != SQLITE_DONE)
+	{
+		db_.rollback();
+		return { 0, "failed to delete expired messages from index" };
+	}
+
+	// Delete from kv table
+	for (const auto& key : expired_keys)
+	{
+		std::string delete_kv_sql = std::format(
+			"DELETE FROM {} WHERE key = ?;",
+			sqlite_config_.kv_table
+		);
+
+		auto [kv_stmt, kv_error] = db_.prepare(delete_kv_sql);
+		if (kv_stmt)
+		{
+			kv_stmt->bind_text(1, key);
+			kv_stmt->step();
+		}
+	}
+
+	auto [commit_ok2, commit_error2] = db_.commit();
+	if (!commit_ok2)
+	{
+		db_.rollback();
+		return { 0, commit_error2 };
+	}
+
+	return { static_cast<int32_t>(expired_keys.size()), std::nullopt };
 }

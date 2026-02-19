@@ -37,6 +37,12 @@ QueueManager::QueueManager(std::shared_ptr<BackendAdapter> backend, const QueueM
 			);
 			thread_pool_->push(retry_worker);
 
+			auto ttl_worker = std::make_shared<Thread::ThreadWorker>(
+				std::vector<Thread::JobPriorities>{ Thread::JobPriorities::LongTerm },
+				"QueueManagerTTLWorker"
+			);
+			thread_pool_->push(ttl_worker);
+
 			auto [started, start_error] = thread_pool_->start();
 			if (!started)
 			{
@@ -68,6 +74,18 @@ QueueManager::QueueManager(std::shared_ptr<BackendAdapter> backend, const QueueM
 				"RetrySweepWorker"
 			);
 			thread_pool_->push(retry_sweep_job);
+
+			// Launch TTL sweep worker (LongTerm priority for background daemon)
+			auto ttl_sweep_job = std::make_shared<Thread::Job>(
+				Thread::JobPriorities::LongTerm,
+				[this]() -> std::tuple<bool, std::optional<std::string>>
+				{
+					ttl_sweep_worker();
+					return { true, std::nullopt };
+				},
+				"TTLSweepWorker"
+			);
+			thread_pool_->push(ttl_sweep_job);
 
 			Utilities::Logger::handle().write(Utilities::LogTypes::Information, "QueueManager started");
 			return { true, std::nullopt };
@@ -274,6 +292,30 @@ QueueManager::QueueManager(std::shared_ptr<BackendAdapter> backend, const QueueM
 			}
 
 			return { true, std::nullopt };
+		}
+
+		auto QueueManager::ttl_sweep_worker(void) -> void
+		{
+			while (running_.load())
+			{
+				auto [purged, error] = backend_->purge_expired_messages();
+				if (error.has_value())
+				{
+					Utilities::Logger::handle().write(
+						Utilities::LogTypes::Error,
+						std::format("Failed to purge expired messages: {}", error.value())
+					);
+				}
+				else if (purged > 0)
+				{
+					Utilities::Logger::handle().write(
+						Utilities::LogTypes::Information,
+						std::format("Purged {} expired messages (TTL)", purged)
+					);
+				}
+
+				std::this_thread::sleep_for(std::chrono::milliseconds(config_.ttl_sweep_interval_ms));
+			}
 		}
 
 		auto QueueManager::calculate_backoff_delay(int32_t attempt, const RetryPolicy& policy) -> int64_t

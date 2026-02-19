@@ -218,6 +218,13 @@ auto FileSystemAdapter::lease_next(const std::string& queue, const std::string& 
 		// Check target_consumer_id filter
 		if (envelope.target_consumer_id.empty() || envelope.target_consumer_id == consumer_id)
 		{
+			// Check TTL: skip expired messages
+			auto check_now = current_time_ms();
+			if (envelope.expired_at_ms > 0 && envelope.expired_at_ms <= check_now)
+			{
+				continue;
+			}
+
 			matched_file_path = file_path;
 			matched_envelope = envelope;
 			break;
@@ -475,6 +482,7 @@ auto FileSystemAdapter::load_policy(const std::string& queue) -> std::tuple<std:
 
 		QueuePolicy policy;
 		policy.visibility_timeout_sec = j.value("visibilityTimeoutSec", 30);
+		policy.ttl_sec = j.value("ttlSec", 0);
 
 		if (j.contains("retry") && j["retry"].is_object())
 		{
@@ -513,6 +521,7 @@ auto FileSystemAdapter::save_policy(const std::string& queue, const QueuePolicy&
 
 	json j;
 	j["visibilityTimeoutSec"] = policy.visibility_timeout_sec;
+	j["ttlSec"] = policy.ttl_sec;
 	j["retry"] = {
 		{ "limit", policy.retry.limit },
 		{ "backoff", policy.retry.backoff },
@@ -1005,6 +1014,7 @@ auto FileSystemAdapter::serialize_envelope(const MessageEnvelope& envelope) -> s
 	j["attempt"] = envelope.attempt;
 	j["createdAt"] = envelope.created_at_ms;
 	j["availableAt"] = envelope.available_at_ms;
+	j["expiredAt"] = envelope.expired_at_ms;
 	j["targetConsumerId"] = envelope.target_consumer_id;
 	return j.dump(2);
 }
@@ -1026,6 +1036,7 @@ auto FileSystemAdapter::deserialize_envelope(const std::string& json_content, co
 		envelope.attempt = j.value("attempt", 0);
 		envelope.created_at_ms = j.value("createdAt", static_cast<int64_t>(0));
 		envelope.available_at_ms = j.value("availableAt", static_cast<int64_t>(0));
+		envelope.expired_at_ms = j.value("expiredAt", static_cast<int64_t>(0));
 		envelope.target_consumer_id = j.value("targetConsumerId", "");
 
 		return { envelope, std::nullopt };
@@ -1281,4 +1292,102 @@ auto FileSystemAdapter::reprocess_dlq_message(const std::string& message_key)
 	}
 
 	return { true, std::nullopt };
+}
+
+auto FileSystemAdapter::purge_expired_messages(void) -> std::tuple<int32_t, std::optional<std::string>>
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+
+	if (!is_open_)
+	{
+		return { 0, "adapter not open" };
+	}
+
+	auto now = current_time_ms();
+	int32_t purged = 0;
+
+	// Scan all queue directories for inbox (ready) and delayed messages
+	std::error_code ec;
+	for (const auto& entry : std::filesystem::directory_iterator(fs_config_.root, ec))
+	{
+		if (!entry.is_directory())
+		{
+			continue;
+		}
+
+		auto queue_name = entry.path().filename().string();
+		if (queue_name == fs_config_.meta_dir)
+		{
+			continue;
+		}
+
+		// Check inbox (ready messages)
+		auto inbox_dir = build_queue_path(queue_name, fs_config_.inbox_dir);
+		auto inbox_files = list_json_files(inbox_dir);
+		for (const auto& file_path : inbox_files)
+		{
+			auto [content, read_error] = read_file(file_path);
+			if (!content.has_value())
+			{
+				continue;
+			}
+
+			try
+			{
+				json j = json::parse(content.value());
+				int64_t expired_at = j.value("expiredAt", static_cast<int64_t>(0));
+				if (expired_at > 0 && expired_at <= now)
+				{
+					std::filesystem::remove(file_path, ec);
+					if (!ec)
+					{
+						purged++;
+					}
+				}
+			}
+			catch (...)
+			{
+				continue;
+			}
+		}
+
+		// Check delayed messages
+		auto delayed_dir = build_queue_path(queue_name, "delayed");
+		auto delayed_files = list_json_files(delayed_dir);
+		for (const auto& file_path : delayed_files)
+		{
+			auto [content, read_error] = read_file(file_path);
+			if (!content.has_value())
+			{
+				continue;
+			}
+
+			try
+			{
+				json j = json::parse(content.value());
+				int64_t expired_at = j.value("expiredAt", static_cast<int64_t>(0));
+				if (expired_at > 0 && expired_at <= now)
+				{
+					std::filesystem::remove(file_path, ec);
+					if (!ec)
+					{
+						purged++;
+
+						// Also delete delayed meta if exists
+						std::string message_key = j.value("key", "");
+						if (!message_key.empty())
+						{
+							delete_delayed_meta(message_key);
+						}
+					}
+				}
+			}
+			catch (...)
+			{
+				continue;
+			}
+		}
+	}
+
+	return { purged, std::nullopt };
 }

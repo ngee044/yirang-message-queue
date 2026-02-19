@@ -887,3 +887,86 @@ TEST_F(ConfigurationsTest, PolicyValidationNegativeMaxDelay)
 	// Negative maxDelaySec should be corrected to 60
 	EXPECT_EQ(policy.retry.max_delay_sec, 60);
 }
+
+// =============================================================================
+// TTL Configuration Tests
+// =============================================================================
+
+TEST_F(ConfigurationsTest, TTLSecDefaultZero)
+{
+	json config = {
+		{"policyDefaults", {
+			{"visibilityTimeoutSec", 30},
+			{"retry", {
+				{"limit", 3},
+				{"backoff", "exponential"},
+				{"initialDelaySec", 1},
+				{"maxDelaySec", 60}
+			}},
+			{"dlq", {
+				{"enabled", true},
+				{"retentionDays", 14}
+			}}
+		}}
+	};
+
+	ConfigFileGuard guard(config);
+	auto cfg = guard.make_configurations();
+	auto policy = cfg->policy_defaults();
+
+	// ttlSec not specified, should default to 0 (disabled)
+	EXPECT_EQ(policy.ttl_sec, 0);
+}
+
+TEST_F(ConfigurationsTest, TTLSecParsedFromConfig)
+{
+	json config = {
+		{"policyDefaults", {
+			{"visibilityTimeoutSec", 30},
+			{"ttlSec", 3600},
+			{"retry", {
+				{"limit", 3},
+				{"backoff", "exponential"},
+				{"initialDelaySec", 1},
+				{"maxDelaySec", 60}
+			}},
+			{"dlq", {
+				{"enabled", true},
+				{"retentionDays", 14}
+			}}
+		}}
+	};
+
+	ConfigFileGuard guard(config);
+	auto cfg = guard.make_configurations();
+	auto policy = cfg->policy_defaults();
+
+	EXPECT_EQ(policy.ttl_sec, 3600);
+}
+
+TEST_F(ConfigurationsTest, TTLSecNegativeValidatesToZero)
+{
+	json config = {
+		{"policyDefaults", {
+			{"visibilityTimeoutSec", 30},
+			{"ttlSec", -100},
+			{"retry", {
+				{"limit", 3},
+				{"backoff", "exponential"},
+				{"initialDelaySec", 1},
+				{"maxDelaySec", 60}
+			}},
+			{"dlq", {
+				{"enabled", true},
+				{"retentionDays", 14}
+			}}
+		}}
+	};
+
+	ConfigFileGuard guard(config);
+	auto cfg = guard.make_configurations();
+	auto policy = cfg->policy_defaults();
+
+	// Negative ttlSec should be corrected to 0 (disabled)
+	EXPECT_EQ(policy.ttl_sec, 0);
+}

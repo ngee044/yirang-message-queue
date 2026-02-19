@@ -40,6 +40,7 @@ struct DlqPolicy
 struct QueuePolicy
 {
 	int32_t visibility_timeout_sec = 0;
+	int32_t ttl_sec = 0;             // 0 = disabled (no TTL)
 	RetryPolicy retry;
 	DlqPolicy dlq;
 };
@@ -82,6 +83,7 @@ struct MessageEnvelope
 	int32_t attempt = 0;
 	int64_t created_at_ms = 0;
 	int64_t available_at_ms = 0;
+	int64_t expired_at_ms = 0;       // 0 = no TTL (unlimited)
 	std::string target_consumer_id;  // empty = any consumer, value = specific consumer only
 };
 
@@ -185,6 +187,9 @@ public:
 	// DLQ management
 	virtual auto list_dlq_messages(const std::string& queue, int32_t limit) -> std::tuple<std::vector<DlqMessageInfo>, std::optional<std::string>> = 0;
 	virtual auto reprocess_dlq_message(const std::string& message_key) -> std::tuple<bool, std::optional<std::string>> = 0;
+
+	// TTL: purge expired messages (ready/delayed only, not inflight)
+	virtual auto purge_expired_messages(void) -> std::tuple<int32_t, std::optional<std::string>> = 0;
 
 	// Consistency check and repair (optional, for Hybrid/FileSystem backends)
 	virtual auto check_consistency(const std::string& queue = "")

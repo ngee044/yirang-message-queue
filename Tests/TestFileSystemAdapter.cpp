@@ -412,3 +412,60 @@ TEST_F(FileSystemAdapterTest, TargetConsumerId)
 	EXPECT_EQ(result2.message->payload_json, R"({"msg":"for_worker2"})");
 	EXPECT_EQ(result2.message->target_consumer_id, "worker-02");
 }
+
+// ---------------------------------------------------------------------------
+// TTL (Time-To-Live) Tests
+// ---------------------------------------------------------------------------
+
+namespace
+{
+	auto fs_now_ms() -> int64_t
+	{
+		return std::chrono::duration_cast<std::chrono::milliseconds>(
+			std::chrono::system_clock::now().time_since_epoch()
+		).count();
+	}
+}
+
+TEST_F(FileSystemAdapterTest, EnqueueWithTTL)
+{
+	auto env = make_envelope("ttl-fq", R"({"data":"ttl_test"})");
+	env.expired_at_ms = fs_now_ms() + 60000;
+
+	auto [ok, err] = adapter_->enqueue(env);
+	EXPECT_TRUE(ok) << err.value_or("");
+
+	auto [metrics, m_err] = adapter_->metrics("ttl-fq");
+	EXPECT_EQ(metrics.ready, 1u);
+}
+
+TEST_F(FileSystemAdapterTest, LeaseSkipsExpiredMessages)
+{
+	auto env = make_envelope("ttl-fq2", R"({"data":"expired"})");
+	env.expired_at_ms = fs_now_ms() - 1000;
+
+	adapter_->enqueue(env);
+
+	auto result = adapter_->lease_next("ttl-fq2", "consumer-1", 30);
+	EXPECT_FALSE(result.leased) << "Expired message should not be leased";
+}
+
+TEST_F(FileSystemAdapterTest, PurgeExpiredMessages)
+{
+	auto env1 = make_envelope("ttl-fq3", R"({"data":"expired"})");
+	env1.expired_at_ms = fs_now_ms() - 1000;
+	adapter_->enqueue(env1);
+
+	auto env2 = make_envelope("ttl-fq3", R"({"data":"not_expired"})");
+	env2.expired_at_ms = fs_now_ms() + 60000;
+	adapter_->enqueue(env2);
+
+	auto env3 = make_envelope("ttl-fq3", R"({"data":"no_ttl"})");
+	adapter_->enqueue(env3);
+
+	auto [purged, p_err] = adapter_->purge_expired_messages();
+	EXPECT_EQ(purged, 1) << "Should purge only the expired message";
+
+	auto [metrics, m_err] = adapter_->metrics("ttl-fq3");
+	EXPECT_EQ(metrics.ready, 2u) << "2 messages should remain (not expired + no TTL)";
+}

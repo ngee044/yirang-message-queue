@@ -194,10 +194,16 @@ auto FileSystemAdapter::lease_next(const std::string& queue, const std::string& 
 		return result;
 	}
 
-	// Find a message that matches the consumer_id filter
-	// (empty target_consumer_id = any consumer, otherwise must match exactly)
-	std::string matched_file_path;
-	std::optional<MessageEnvelope> matched_envelope;
+	// Collect all eligible candidates, then sort by priority DESC, available_at ASC
+	// to match SQLite/Hybrid backend ordering (FR-STR-03)
+	struct Candidate
+	{
+		std::string file_path;
+		MessageEnvelope envelope;
+	};
+	std::vector<Candidate> candidates;
+
+	auto check_now = current_time_ms();
 
 	for (const auto& file_path : files)
 	{
@@ -215,20 +221,44 @@ auto FileSystemAdapter::lease_next(const std::string& queue, const std::string& 
 
 		auto& envelope = envelope_opt.value();
 
-		// Check target_consumer_id filter
-		if (envelope.target_consumer_id.empty() || envelope.target_consumer_id == consumer_id)
+		// Check available_at: skip messages not yet available
+		if (envelope.available_at_ms > check_now)
 		{
-			// Check TTL: skip expired messages
-			auto check_now = current_time_ms();
-			if (envelope.expired_at_ms > 0 && envelope.expired_at_ms <= check_now)
-			{
-				continue;
-			}
-
-			matched_file_path = file_path;
-			matched_envelope = envelope;
-			break;
+			continue;
 		}
+
+		// Check target_consumer_id filter
+		if (!envelope.target_consumer_id.empty() && envelope.target_consumer_id != consumer_id)
+		{
+			continue;
+		}
+
+		// Check TTL: skip expired messages
+		if (envelope.expired_at_ms > 0 && envelope.expired_at_ms <= check_now)
+		{
+			continue;
+		}
+
+		candidates.push_back({ file_path, envelope });
+	}
+
+	// Sort: priority DESC (higher value first), then available_at ASC (older first)
+	std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b)
+	{
+		if (a.envelope.priority != b.envelope.priority)
+		{
+			return a.envelope.priority > b.envelope.priority;
+		}
+		return a.envelope.available_at_ms < b.envelope.available_at_ms;
+	});
+
+	std::string matched_file_path;
+	std::optional<MessageEnvelope> matched_envelope;
+
+	if (!candidates.empty())
+	{
+		matched_file_path = candidates[0].file_path;
+		matched_envelope = candidates[0].envelope;
 	}
 
 	if (!matched_envelope.has_value())

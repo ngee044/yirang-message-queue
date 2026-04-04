@@ -15,6 +15,7 @@ set(TEST_SOURCES
 	TestQueueManager.cpp
 	TestConfigurations.cpp
 	TestMailboxHandler.cpp
+	TestBackendContract.cpp
 )
 
 foreach(TEST_SOURCE IN LISTS TEST_SOURCES)

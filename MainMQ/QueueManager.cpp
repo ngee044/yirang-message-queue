@@ -109,8 +109,22 @@ QueueManager::QueueManager(std::shared_ptr<BackendAdapter> backend, const QueueM
 			std::lock_guard<std::mutex> lock(policies_mutex_);
 			queue_policies_[queue_name] = policy;
 
-			// Save policy to backend
-			backend_->save_policy(queue_name, policy);
+			// Save policy to backend (single point of policy persistence)
+			auto [saved, error] = backend_->save_policy(queue_name, policy);
+			if (saved)
+			{
+				Utilities::Logger::handle().write(
+					Utilities::LogTypes::Information,
+					std::format("Registered queue: {}", queue_name)
+				);
+			}
+			else
+			{
+				Utilities::Logger::handle().write(
+					Utilities::LogTypes::Error,
+					std::format("Failed to save policy for queue {}: {}", queue_name, error.value_or("unknown"))
+				);
+			}
 		}
 
 		auto QueueManager::get_policy(const std::string& queue_name) -> std::optional<QueuePolicy>

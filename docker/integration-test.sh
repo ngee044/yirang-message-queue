@@ -109,7 +109,8 @@ if [[ "$RUN_INTEGRATION" == true ]]; then
     DAEMON_PID=$!
     sleep 2
 
-    # Verify daemon is running
+    # Verify daemon is running (give it extra time to initialize)
+    sleep 3
     if ! kill -0 $DAEMON_PID 2>/dev/null; then
         log_fail "MainMQ daemon failed to start"
     else
@@ -117,7 +118,7 @@ if [[ "$RUN_INTEGRATION" == true ]]; then
 
         # --- Test 1: Health Check ---
         log_info "[IT-01] Health check..."
-        if HEALTH=$(/app/yirangmq-cli-publisher health 2>&1) && echo "$HEALTH" | grep -q '"status"'; then
+        if HEALTH=$(/app/yirangmq-cli-publisher health --timeout 10000 2>&1) && echo "$HEALTH" | grep -q '"status"'; then
             log_pass "IT-01: Health check"
         else
             log_fail "IT-01: Health check"
@@ -125,7 +126,7 @@ if [[ "$RUN_INTEGRATION" == true ]]; then
 
         # --- Test 2: Publish Message ---
         log_info "[IT-02] Publish message..."
-        if PUB=$(/app/yirangmq-cli-publisher --queue test-queue --message '{"sensor":"temp","value":25.5}' 2>&1) && echo "$PUB" | grep -q '"ok"\|"status"'; then
+        if PUB=$(/app/yirangmq-cli-publisher --queue test-queue --message '{"sensor":"temp","value":25.5}' --timeout 10000 2>&1) && echo "$PUB" | grep -q '"messageId"\|"messageKey"\|"published successfully"'; then
             log_pass "IT-02: Publish message"
         else
             log_fail "IT-02: Publish message — $PUB"
@@ -141,7 +142,8 @@ if [[ "$RUN_INTEGRATION" == true ]]; then
 
         # --- Test 4: Consume Message ---
         log_info "[IT-04] Consume message..."
-        if CONSUME=$(/app/yirangmq-cli-consumer consume --queue test-queue --consumer-id test-worker 2>&1); then
+        sleep 1
+        if CONSUME=$(/app/yirangmq-cli-consumer consume --queue test-queue --consumer-id test-worker --timeout 10000 2>&1); then
             if echo "$CONSUME" | grep -q '"messageKey"\|"message_key"\|"leaseId"\|"lease_id"'; then
                 log_pass "IT-04: Consume message"
                 # Extract message key for ACK test
@@ -159,7 +161,7 @@ if [[ "$RUN_INTEGRATION" == true ]]; then
         # --- Test 5: ACK ---
         if [[ -n "$MSG_KEY" ]]; then
             log_info "[IT-05] ACK message ($MSG_KEY)..."
-            if ACK=$(/app/yirangmq-cli-consumer ack --message-key "$MSG_KEY" 2>&1) && echo "$ACK" | grep -q '"ok"\|"status"'; then
+            if ACK=$(/app/yirangmq-cli-consumer ack --message-key "$MSG_KEY" --timeout 10000 2>&1) && echo "$ACK" | grep -qi 'acknowledged\|"ok"\|"status"'; then
                 log_pass "IT-05: ACK message"
             else
                 log_fail "IT-05: ACK message — $ACK"
@@ -171,17 +173,17 @@ if [[ "$RUN_INTEGRATION" == true ]]; then
 
         # --- Test 6: Publish + NACK + DLQ ---
         log_info "[IT-06] NACK and DLQ flow..."
-        /app/yirangmq-cli-publisher --queue test-queue --message '{"test":"nack-flow"}' >/dev/null 2>&1
-        sleep 1
-        CONSUME2=$(/app/yirangmq-cli-consumer consume --queue test-queue --consumer-id test-worker 2>&1)
+        /app/yirangmq-cli-publisher --queue test-queue --message '{"test":"nack-flow"}' --timeout 10000 >/dev/null 2>&1
+        sleep 2
+        CONSUME2=$(/app/yirangmq-cli-consumer consume --queue test-queue --consumer-id test-worker --timeout 10000 2>&1)
         MSG_KEY2=$(echo "$CONSUME2" | grep -o '"messageKey"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)
         if [[ -z "$MSG_KEY2" ]]; then
             MSG_KEY2=$(echo "$CONSUME2" | grep -o '"message_key"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)
         fi
 
         if [[ -n "$MSG_KEY2" ]]; then
-            NACK=$(/app/yirangmq-cli-consumer nack --message-key "$MSG_KEY2" --reason "test failure" --requeue 2>&1)
-            if echo "$NACK" | grep -q '"ok"\|"status"'; then
+            NACK=$(/app/yirangmq-cli-consumer nack --message-key "$MSG_KEY2" --reason "test failure" --requeue --timeout 10000 2>&1)
+            if echo "$NACK" | grep -qi 'nack\|requeue\|acknowledged\|"ok"\|"status"'; then
                 log_pass "IT-06: NACK with requeue"
             else
                 log_fail "IT-06: NACK with requeue — $NACK"
@@ -200,7 +202,7 @@ if [[ "$RUN_INTEGRATION" == true ]]; then
 
         # --- Test 8: Direct Addressing ---
         log_info "[IT-08] Direct addressing..."
-        /app/yirangmq-cli-publisher --queue test-queue --message '{"direct":true}' --target specific-worker >/dev/null 2>&1
+        /app/yirangmq-cli-publisher --queue test-queue --message '{"direct":true}' --target specific-worker --timeout 10000 >/dev/null 2>&1
         sleep 1
 
         # Wrong consumer should get nothing

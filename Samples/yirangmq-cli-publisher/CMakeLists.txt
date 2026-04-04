@@ -17,11 +17,13 @@ add_executable(${PROGRAM_NAME} ${SOURCE_FILES})
 
 target_link_libraries(${PROGRAM_NAME} PUBLIC
 	Utilities
+	MailboxClient
 	nlohmann_json::nlohmann_json
 )
 
 target_include_directories(${PROGRAM_NAME} PRIVATE
 	"${CMAKE_SOURCE_DIR}/CommonLibrary/Utilities"
+	"${CMAKE_SOURCE_DIR}/CommonLibrary/MailboxClient"
 	"${CMAKE_CURRENT_SOURCE_DIR}"
 )
 

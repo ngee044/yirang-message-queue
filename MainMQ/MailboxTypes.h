@@ -31,7 +31,9 @@ enum class MailboxCommand
 	Health,
 	Metrics,
 	ListDlq,
-	ReprocessDlq
+	ReprocessDlq,
+	BatchPublish,
+	BatchConsume
 };
 
 // Mailbox request structure
@@ -147,6 +149,14 @@ struct MailboxMetrics
 	// Timing (cumulative ms)
 	uint64_t total_processing_time_ms = 0;
 	uint64_t last_request_time_ms = 0;
+
+	// Phase-level timing (cumulative ms) — for bottleneck analysis
+	uint64_t total_parse_time_ms = 0;
+	uint64_t total_backend_time_ms = 0;
+	uint64_t total_response_write_time_ms = 0;
+
+	// Queue depth tracking
+	uint64_t peak_pending_depth = 0;
 
 	// Uptime
 	int64_t start_time_ms = 0;

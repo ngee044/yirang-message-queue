@@ -1314,3 +1314,65 @@ TEST_F(MailboxHandlerTest, PublishWithDelay)
 	ASSERT_GE(calls.size(), 1u);
 	EXPECT_GT(calls[0].envelope.available_at_ms, calls[0].envelope.created_at_ms);
 }
+
+// ============================================================
+// Batch Publish (FR-PUB-08)
+// ============================================================
+TEST_F(MailboxHandlerTest, BatchPublishMultipleMessages)
+{
+	auto [ok, err] = handler_->start();
+	ASSERT_TRUE(ok);
+
+	json req;
+	req["requestId"] = "batch-pub-01";
+	req["clientId"] = "test-client";
+	req["command"] = "batchPublish";
+	req["payload"] = {
+		{ "queue", "test-queue" },
+		{ "messages", json::array({
+			{ { "message", { { "data", 1 } } } },
+			{ { "message", { { "data", 2 } } } },
+			{ { "message", { { "data", 3 } } } }
+		})}
+	};
+
+	write_request(req);
+	auto response = wait_for_response("test-client", "batch-pub-01");
+	ASSERT_TRUE(response.has_value());
+	EXPECT_TRUE((*response)["ok"].get<bool>());
+
+	auto& data = (*response)["data"];
+	EXPECT_EQ(data["published"].get<int32_t>(), 3);
+	EXPECT_EQ(data["total"].get<int32_t>(), 3);
+}
+
+// ============================================================
+// Batch Consume (FR-CON-06)
+// ============================================================
+TEST_F(MailboxHandlerTest, BatchConsumeReturnsValidResponse)
+{
+	auto [ok, err] = handler_->start();
+	ASSERT_TRUE(ok);
+
+	// Batch consume on empty queue (MockBackend returns no lease)
+	json req;
+	req["requestId"] = "batch-con-01";
+	req["clientId"] = "test-client";
+	req["command"] = "batchConsume";
+	req["payload"] = {
+		{ "queue", "test-queue" },
+		{ "consumerId", "worker-1" },
+		{ "maxMessages", 5 }
+	};
+
+	write_request(req);
+	auto response = wait_for_response("test-client", "batch-con-01");
+	ASSERT_TRUE(response.has_value());
+	EXPECT_TRUE((*response)["ok"].get<bool>());
+
+	auto& data = (*response)["data"];
+	EXPECT_TRUE(data.contains("count"));
+	EXPECT_TRUE(data.contains("messages"));
+	EXPECT_TRUE(data["messages"].is_array());
+	EXPECT_EQ(data["count"].get<int32_t>(), 0); // Empty queue
+}

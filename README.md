@@ -187,8 +187,8 @@ cd build/out
 # 특정 Consumer에게만 발행 (Direct Addressing)
 ./yirangmq-cli-publisher --message '{"alert":"high"}' --target worker-01
 
-# 우선순위 지정 (0이 가장 높음)
-./yirangmq-cli-publisher --message '{"urgent":true}' --priority 0
+# 우선순위 지정 (값이 클수록 높은 우선순위, 기본값 0)
+./yirangmq-cli-publisher --message '{"urgent":true}' --priority 10
 
 # 지연 발행 (5초 후 ready 상태)
 ./yirangmq-cli-publisher --message '{"scheduled":true}' --delay 5000
@@ -300,7 +300,7 @@ cd build/out
 | `--message <json>` | 메시지 페이로드 (필수) | - |
 | `--queue <name>` | 큐 이름 | 설정 파일 값 |
 | `--target <id>` | 대상 Consumer ID | 미지정 (모두) |
-| `--priority <n>` | 우선순위 (0이 최고) | 0 |
+| `--priority <n>` | 우선순위 (값이 클수록 높음) | 0 |
 | `--delay <ms>` | 지연 시간 (ms) | 0 |
 | `--ipc-root <path>` | IPC 폴더 경로 | ./ipc |
 | `--timeout <ms>` | 응답 대기 시간 | 30000 |

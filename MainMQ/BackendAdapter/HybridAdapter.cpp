@@ -5,6 +5,7 @@
 #include "Logger.h"
 
 #include <nlohmann/json.hpp>
+#include <sqlite3.h>
 
 #include <algorithm>
 #include <chrono>
@@ -164,22 +165,20 @@ auto HybridAdapter::ensure_schema(void) -> std::tuple<bool, std::optional<std::s
 
 auto HybridAdapter::load_schema_sql(void) -> std::tuple<std::optional<std::string>, std::optional<std::string>>
 {
-	Utilities::File file;
-	auto [opened, open_error] = file.open(schema_path_, std::ios::in);
-	if (!opened)
+	std::ifstream file(schema_path_);
+	if (!file.is_open())
 	{
-		return { std::nullopt, std::format("cannot open schema file: {}", open_error.value_or("unknown")) };
+		if (!std::filesystem::exists(schema_path_))
+		{
+			return { std::nullopt, std::format("cannot open schema file: there is no file : {}", schema_path_) };
+		}
+		return { std::nullopt, std::format("cannot open schema file: {}", schema_path_) };
 	}
 
-	auto [data, read_error] = file.read_bytes();
+	std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
 	file.close();
 
-	if (!data.has_value())
-	{
-		return { std::nullopt, std::format("cannot read schema file: {}", read_error.value_or("unknown")) };
-	}
-
-	return { std::string(data->begin(), data->end()), std::nullopt };
+	return { content, std::nullopt };
 }
 
 auto HybridAdapter::ensure_payload_directories(const std::string& queue) -> std::tuple<bool, std::optional<std::string>>
@@ -254,41 +253,53 @@ auto HybridAdapter::enqueue(const MessageEnvelope& message) -> std::tuple<bool, 
 	envelope["attempt"] = message.attempt;
 	envelope["createdAt"] = message.created_at_ms;
 
-	std::string insert_kv = std::format(
-		"INSERT INTO {} (key, value, value_type, created_at, updated_at) VALUES ('{}', '{}', 'message', {}, {})",
-		sqlite_config_.kv_table,
-		message.key,
-		envelope.dump(),
-		now,
-		now
+	std::string insert_kv_sql = std::format(
+		"INSERT INTO {} (key, value, value_type, created_at, updated_at) VALUES (?, ?, 'message', ?, ?)",
+		sqlite_config_.kv_table
 	);
 
-	auto [kv_ok, kv_error] = db_.execute(insert_kv);
-	if (!kv_ok)
+	auto [kv_stmt, kv_prep_error] = db_.prepare(insert_kv_sql);
+	if (!kv_stmt)
 	{
 		db_.rollback();
-		return { false, std::format("kv insert failed: {}", kv_error.value_or("unknown")) };
+		return { false, std::format("kv insert prepare failed: {}", kv_prep_error.value_or("unknown")) };
+	}
+	kv_stmt->bind_text(1, message.key);
+	kv_stmt->bind_text(2, envelope.dump());
+	kv_stmt->bind_int64(3, now);
+	kv_stmt->bind_int64(4, now);
+
+	if (kv_stmt->step() != SQLITE_DONE)
+	{
+		db_.rollback();
+		return { false, "kv insert failed" };
 	}
 
-	std::string insert_idx = std::format(
+	std::string insert_idx_sql = std::format(
 		"INSERT INTO {} (queue, state, priority, available_at, lease_until, attempt, target_consumer_id, message_key, expired_at) "
-		"VALUES ('{}', '{}', {}, {}, NULL, {}, '{}', '{}', {})",
-		sqlite_config_.message_index_table,
-		message.queue,
-		state,
-		message.priority,
-		message.available_at_ms,
-		message.attempt,
-		message.target_consumer_id,
-		message.key,
-		message.expired_at_ms
+		"VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?)",
+		sqlite_config_.message_index_table
 	);
 
-	auto [idx_ok, idx_error] = db_.execute(insert_idx);
-	if (!idx_ok)
+	auto [idx_stmt, idx_prep_error] = db_.prepare(insert_idx_sql);
+	if (!idx_stmt)
 	{
 		db_.rollback();
-		return { false, std::format("index insert failed: {}", idx_error.value_or("unknown")) };
+		return { false, std::format("index insert prepare failed: {}", idx_prep_error.value_or("unknown")) };
+	}
+	idx_stmt->bind_text(1, message.queue);
+	idx_stmt->bind_text(2, state);
+	idx_stmt->bind_int(3, message.priority);
+	idx_stmt->bind_int64(4, message.available_at_ms);
+	idx_stmt->bind_int(5, message.attempt);
+	idx_stmt->bind_text(6, message.target_consumer_id);
+	idx_stmt->bind_text(7, message.key);
+	idx_stmt->bind_int64(8, message.expired_at_ms);
+
+	if (idx_stmt->step() != SQLITE_DONE)
+	{
+		db_.rollback();
+		return { false, "index insert failed" };
 	}
 
 	// Write payload file AFTER successful SQLite inserts
@@ -341,58 +352,79 @@ auto HybridAdapter::lease_next(const std::string& queue, const std::string& cons
 
 	std::string select_sql = std::format(
 		"SELECT message_key, attempt FROM {} "
-		"WHERE queue = '{}' AND state = 'ready' AND available_at <= {} "
-		"AND (target_consumer_id = '' OR target_consumer_id = '{}') "
-		"AND (expired_at = 0 OR expired_at > {}) "
+		"WHERE queue = ? AND state = 'ready' AND available_at <= ? "
+		"AND (target_consumer_id = '' OR target_consumer_id = ?) "
+		"AND (expired_at = 0 OR expired_at > ?) "
 		"ORDER BY priority DESC, available_at ASC LIMIT 1",
-		sqlite_config_.message_index_table,
-		queue,
-		now,
-		consumer_id,
-		now
+		sqlite_config_.message_index_table
 	);
 
-	auto [query_result, query_error] = db_.query(select_sql);
-	if (!query_result.has_value() || query_result->rows.empty())
+	auto [select_stmt, select_prep_error] = db_.prepare(select_sql);
+	if (!select_stmt)
+	{
+		db_.rollback();
+		result.error = select_prep_error;
+		return result;
+	}
+	select_stmt->bind_text(1, queue);
+	select_stmt->bind_int64(2, now);
+	select_stmt->bind_text(3, consumer_id);
+	select_stmt->bind_int64(4, now);
+
+	if (select_stmt->step() != SQLITE_ROW)
 	{
 		db_.rollback();
 		return result;
 	}
 
-	std::string message_key = query_result->rows[0][0];
-	int32_t attempt = std::stoi(query_result->rows[0][1]);
+	std::string message_key = select_stmt->column_text(0);
+	int32_t attempt = select_stmt->column_int(1);
 
 	std::string update_sql = std::format(
-		"UPDATE {} SET state = 'inflight', lease_until = {}, attempt = {} WHERE message_key = '{}'",
-		sqlite_config_.message_index_table,
-		lease_until,
-		attempt + 1,
-		message_key
+		"UPDATE {} SET state = 'inflight', lease_until = ?, attempt = ? WHERE message_key = ?",
+		sqlite_config_.message_index_table
 	);
 
-	auto [update_ok, update_error] = db_.execute(update_sql);
-	if (!update_ok)
+	auto [update_stmt, update_prep_error] = db_.prepare(update_sql);
+	if (!update_stmt)
 	{
 		db_.rollback();
-		result.error = update_error;
+		result.error = update_prep_error;
+		return result;
+	}
+	update_stmt->bind_int64(1, lease_until);
+	update_stmt->bind_int(2, attempt + 1);
+	update_stmt->bind_text(3, message_key);
+
+	if (update_stmt->step() != SQLITE_DONE)
+	{
+		db_.rollback();
+		result.error = "update inflight failed";
 		return result;
 	}
 
 	std::string kv_sql = std::format(
-		"SELECT value FROM {} WHERE key = '{}'",
-		sqlite_config_.kv_table,
-		message_key
+		"SELECT value FROM {} WHERE key = ?",
+		sqlite_config_.kv_table
 	);
 
-	auto [kv_result, kv_error] = db_.query(kv_sql);
-	if (!kv_result.has_value() || kv_result->rows.empty())
+	auto [kv_stmt, kv_prep_error] = db_.prepare(kv_sql);
+	if (!kv_stmt)
+	{
+		db_.rollback();
+		result.error = kv_prep_error;
+		return result;
+	}
+	kv_stmt->bind_text(1, message_key);
+
+	if (kv_stmt->step() != SQLITE_ROW)
 	{
 		db_.rollback();
 		result.error = "envelope not found";
 		return result;
 	}
 
-	std::string envelope_json = kv_result->rows[0][0];
+	std::string envelope_json = kv_stmt->column_text(0);
 
 	auto [commit_ok, commit_error] = db_.commit();
 	if (!commit_ok)
@@ -456,44 +488,62 @@ auto HybridAdapter::ack(const LeaseToken& lease) -> std::tuple<bool, std::option
 	}
 
 	std::string check_sql = std::format(
-		"SELECT queue FROM {} WHERE message_key = '{}' AND state = 'inflight'",
-		sqlite_config_.message_index_table,
-		lease.message_key
+		"SELECT queue FROM {} WHERE message_key = ? AND state = 'inflight'",
+		sqlite_config_.message_index_table
 	);
 
-	auto [check_result, check_error] = db_.query(check_sql);
-	if (!check_result.has_value() || check_result->rows.empty())
+	auto [check_stmt, check_prep_error] = db_.prepare(check_sql);
+	if (!check_stmt)
+	{
+		db_.rollback();
+		return { false, check_prep_error };
+	}
+	check_stmt->bind_text(1, lease.message_key);
+
+	if (check_stmt->step() != SQLITE_ROW)
 	{
 		db_.rollback();
 		return { false, "message not found or not inflight" };
 	}
 
-	std::string queue = check_result->rows[0][0];
+	std::string queue = check_stmt->column_text(0);
 
-	std::string delete_idx = std::format(
-		"DELETE FROM {} WHERE message_key = '{}'",
-		sqlite_config_.message_index_table,
-		lease.message_key
+	std::string delete_idx_sql = std::format(
+		"DELETE FROM {} WHERE message_key = ?",
+		sqlite_config_.message_index_table
 	);
 
-	auto [del_idx_ok, del_idx_error] = db_.execute(delete_idx);
-	if (!del_idx_ok)
+	auto [del_idx_stmt, del_idx_prep_error] = db_.prepare(delete_idx_sql);
+	if (!del_idx_stmt)
 	{
 		db_.rollback();
-		return { false, del_idx_error };
+		return { false, del_idx_prep_error };
+	}
+	del_idx_stmt->bind_text(1, lease.message_key);
+
+	if (del_idx_stmt->step() != SQLITE_DONE)
+	{
+		db_.rollback();
+		return { false, "delete index failed" };
 	}
 
-	std::string delete_kv = std::format(
-		"DELETE FROM {} WHERE key = '{}'",
-		sqlite_config_.kv_table,
-		lease.message_key
+	std::string delete_kv_sql = std::format(
+		"DELETE FROM {} WHERE key = ?",
+		sqlite_config_.kv_table
 	);
 
-	auto [del_kv_ok, del_kv_error] = db_.execute(delete_kv);
-	if (!del_kv_ok)
+	auto [del_kv_stmt, del_kv_prep_error] = db_.prepare(delete_kv_sql);
+	if (!del_kv_stmt)
 	{
 		db_.rollback();
-		return { false, del_kv_error };
+		return { false, del_kv_prep_error };
+	}
+	del_kv_stmt->bind_text(1, lease.message_key);
+
+	if (del_kv_stmt->step() != SQLITE_DONE)
+	{
+		db_.rollback();
+		return { false, "delete kv failed" };
 	}
 
 	auto [commit_ok, commit_error] = db_.commit();
@@ -535,61 +585,83 @@ auto HybridAdapter::nack(const LeaseToken& lease, const std::string& reason, con
 	}
 
 	std::string check_sql = std::format(
-		"SELECT queue FROM {} WHERE message_key = '{}' AND state = 'inflight'",
-		sqlite_config_.message_index_table,
-		lease.message_key
+		"SELECT queue FROM {} WHERE message_key = ? AND state = 'inflight'",
+		sqlite_config_.message_index_table
 	);
 
-	auto [check_result, check_error] = db_.query(check_sql);
-	if (!check_result.has_value() || check_result->rows.empty())
+	auto [check_stmt, check_prep_error] = db_.prepare(check_sql);
+	if (!check_stmt)
+	{
+		db_.rollback();
+		return { false, check_prep_error };
+	}
+	check_stmt->bind_text(1, lease.message_key);
+
+	if (check_stmt->step() != SQLITE_ROW)
 	{
 		db_.rollback();
 		return { false, "message not found or not inflight" };
 	}
 
-	std::string queue = check_result->rows[0][0];
+	std::string queue = check_stmt->column_text(0);
 
 	if (requeue)
 	{
 		std::string update_sql = std::format(
-			"UPDATE {} SET state = 'ready', lease_until = NULL, available_at = {} WHERE message_key = '{}'",
-			sqlite_config_.message_index_table,
-			now,
-			lease.message_key
+			"UPDATE {} SET state = 'ready', lease_until = NULL, available_at = ? WHERE message_key = ?",
+			sqlite_config_.message_index_table
 		);
 
-		auto [update_ok, update_error] = db_.execute(update_sql);
-		if (!update_ok)
+		auto [update_stmt, update_prep_error] = db_.prepare(update_sql);
+		if (!update_stmt)
 		{
 			db_.rollback();
-			return { false, update_error };
+			return { false, update_prep_error };
+		}
+		update_stmt->bind_int64(1, now);
+		update_stmt->bind_text(2, lease.message_key);
+
+		if (update_stmt->step() != SQLITE_DONE)
+		{
+			db_.rollback();
+			return { false, "update to ready failed" };
 		}
 	}
 	else
 	{
 		std::string update_sql = std::format(
-			"UPDATE {} SET state = 'dlq', lease_until = NULL WHERE message_key = '{}'",
-			sqlite_config_.message_index_table,
-			lease.message_key
+			"UPDATE {} SET state = 'dlq', lease_until = NULL WHERE message_key = ?",
+			sqlite_config_.message_index_table
 		);
 
-		auto [update_ok, update_error] = db_.execute(update_sql);
-		if (!update_ok)
+		auto [update_stmt, update_prep_error] = db_.prepare(update_sql);
+		if (!update_stmt)
 		{
 			db_.rollback();
-			return { false, update_error };
+			return { false, update_prep_error };
+		}
+		update_stmt->bind_text(1, lease.message_key);
+
+		if (update_stmt->step() != SQLITE_DONE)
+		{
+			db_.rollback();
+			return { false, "update to dlq failed" };
 		}
 
-		std::string update_kv = std::format(
-			"UPDATE {} SET value = json_set(value, '$.dlqReason', '{}', '$.dlqAt', {}), updated_at = {} WHERE key = '{}'",
-			sqlite_config_.kv_table,
-			reason,
-			now,
-			now,
-			lease.message_key
+		std::string update_kv_sql = std::format(
+			"UPDATE {} SET value = json_set(value, '$.dlqReason', ?, '$.dlqAt', ?), updated_at = ? WHERE key = ?",
+			sqlite_config_.kv_table
 		);
 
-		db_.execute(update_kv);
+		auto [kv_stmt, kv_prep_error] = db_.prepare(update_kv_sql);
+		if (kv_stmt)
+		{
+			kv_stmt->bind_text(1, reason);
+			kv_stmt->bind_int64(2, now);
+			kv_stmt->bind_int64(3, now);
+			kv_stmt->bind_text(4, lease.message_key);
+			kv_stmt->step();
+		}
 
 		auto message_id = extract_message_id_from_key(lease.message_key);
 		move_payload_to_dlq(queue, message_id);
@@ -619,14 +691,25 @@ auto HybridAdapter::extend_lease(const LeaseToken& lease, const int32_t& visibil
 	auto new_lease_until = now + (static_cast<int64_t>(visibility_timeout_sec) * 1000);
 
 	std::string update_sql = std::format(
-		"UPDATE {} SET lease_until = {} WHERE message_key = '{}' AND state = 'inflight' AND lease_until > {}",
-		sqlite_config_.message_index_table,
-		new_lease_until,
-		lease.message_key,
-		now
+		"UPDATE {} SET lease_until = ? WHERE message_key = ? AND state = 'inflight' AND lease_until > ?",
+		sqlite_config_.message_index_table
 	);
 
-	return db_.execute(update_sql);
+	auto [stmt, prep_error] = db_.prepare(update_sql);
+	if (!stmt)
+	{
+		return { false, prep_error };
+	}
+	stmt->bind_int64(1, new_lease_until);
+	stmt->bind_text(2, lease.message_key);
+	stmt->bind_int64(3, now);
+
+	if (stmt->step() != SQLITE_DONE)
+	{
+		return { false, "extend lease failed" };
+	}
+
+	return { true, std::nullopt };
 }
 
 auto HybridAdapter::load_policy(const std::string& queue)
@@ -641,18 +724,23 @@ auto HybridAdapter::load_policy(const std::string& queue)
 
 	std::string policy_key = std::format("policy:{}", queue);
 	std::string select_sql = std::format(
-		"SELECT value FROM {} WHERE key = '{}'",
-		sqlite_config_.kv_table,
-		policy_key
+		"SELECT value FROM {} WHERE key = ?",
+		sqlite_config_.kv_table
 	);
 
-	auto [query_result, query_error] = db_.query(select_sql);
-	if (!query_result.has_value() || query_result->rows.empty())
+	auto [stmt, prep_error] = db_.prepare(select_sql);
+	if (!stmt)
+	{
+		return { std::nullopt, prep_error };
+	}
+	stmt->bind_text(1, policy_key);
+
+	if (stmt->step() != SQLITE_ROW)
 	{
 		return { std::nullopt, std::nullopt };
 	}
 
-	std::string value_json = query_result->rows[0][0];
+	std::string value_json = stmt->column_text(0);
 
 	try
 	{
@@ -718,18 +806,27 @@ auto HybridAdapter::save_policy(const std::string& queue, const QueuePolicy& pol
 	};
 
 	std::string upsert_sql = std::format(
-		"INSERT INTO {} (key, value, value_type, created_at, updated_at) VALUES ('{}', '{}', 'policy', {}, {}) "
-		"ON CONFLICT(key) DO UPDATE SET value = '{}', updated_at = {}",
-		sqlite_config_.kv_table,
-		policy_key,
-		j.dump(),
-		now,
-		now,
-		j.dump(),
-		now
+		"INSERT INTO {} (key, value, value_type, created_at, updated_at) VALUES (?, ?, 'policy', ?, ?) "
+		"ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+		sqlite_config_.kv_table
 	);
 
-	return db_.execute(upsert_sql);
+	auto [stmt, prep_error] = db_.prepare(upsert_sql);
+	if (!stmt)
+	{
+		return { false, prep_error };
+	}
+	stmt->bind_text(1, policy_key);
+	stmt->bind_text(2, j.dump());
+	stmt->bind_int64(3, now);
+	stmt->bind_int64(4, now);
+
+	if (stmt->step() != SQLITE_DONE)
+	{
+		return { false, "save policy failed" };
+	}
+
+	return { true, std::nullopt };
 }
 
 auto HybridAdapter::metrics(const std::string& queue) -> std::tuple<QueueMetrics, std::optional<std::string>>
@@ -744,40 +841,37 @@ auto HybridAdapter::metrics(const std::string& queue) -> std::tuple<QueueMetrics
 	}
 
 	std::string sql = std::format(
-		"SELECT state, COUNT(*) as cnt FROM {} WHERE queue = '{}' GROUP BY state",
-		sqlite_config_.message_index_table,
-		queue
+		"SELECT state, COUNT(*) as cnt FROM {} WHERE queue = ? GROUP BY state",
+		sqlite_config_.message_index_table
 	);
 
-	auto [query_result, query_error] = db_.query(sql);
-	if (!query_result.has_value())
+	auto [stmt, prep_error] = db_.prepare(sql);
+	if (!stmt)
 	{
-		return { m, query_error };
+		return { m, prep_error };
 	}
+	stmt->bind_text(1, queue);
 
-	for (const auto& row : query_result->rows)
+	while (stmt->step() == SQLITE_ROW)
 	{
-		if (row.size() >= 2)
-		{
-			std::string state = row[0];
-			uint64_t count = std::stoull(row[1]);
+		std::string state = stmt->column_text(0);
+		uint64_t count = static_cast<uint64_t>(stmt->column_int64(1));
 
-			if (state == "ready")
-			{
-				m.ready = count;
-			}
-			else if (state == "inflight")
-			{
-				m.inflight = count;
-			}
-			else if (state == "delayed")
-			{
-				m.delayed = count;
-			}
-			else if (state == "dlq")
-			{
-				m.dlq = count;
-			}
+		if (state == "ready")
+		{
+			m.ready = count;
+		}
+		else if (state == "inflight")
+		{
+			m.inflight = count;
+		}
+		else if (state == "delayed")
+		{
+			m.delayed = count;
+		}
+		else if (state == "dlq")
+		{
+			m.dlq = count;
 		}
 	}
 
@@ -797,16 +891,21 @@ auto HybridAdapter::recover_expired_leases(void) -> std::tuple<int32_t, std::opt
 
 	// First count how many will be affected
 	std::string count_sql = std::format(
-		"SELECT COUNT(*) FROM {} WHERE state = 'inflight' AND lease_until < {}",
-		sqlite_config_.message_index_table,
-		now
+		"SELECT COUNT(*) FROM {} WHERE state = 'inflight' AND lease_until < ?",
+		sqlite_config_.message_index_table
 	);
 
-	auto [count_result, count_error] = db_.query(count_sql);
-	int32_t count = 0;
-	if (count_result.has_value() && !count_result->rows.empty())
+	auto [count_stmt, count_prep_error] = db_.prepare(count_sql);
+	if (!count_stmt)
 	{
-		count = std::stoi(count_result->rows[0][0]);
+		return { 0, count_prep_error };
+	}
+	count_stmt->bind_int64(1, now);
+
+	int32_t count = 0;
+	if (count_stmt->step() == SQLITE_ROW)
+	{
+		count = count_stmt->column_int(0);
 	}
 
 	if (count == 0)
@@ -815,17 +914,22 @@ auto HybridAdapter::recover_expired_leases(void) -> std::tuple<int32_t, std::opt
 	}
 
 	std::string update_sql = std::format(
-		"UPDATE {} SET state = 'ready', lease_until = NULL, available_at = {} "
-		"WHERE state = 'inflight' AND lease_until < {}",
-		sqlite_config_.message_index_table,
-		now,
-		now
+		"UPDATE {} SET state = 'ready', lease_until = NULL, available_at = ? "
+		"WHERE state = 'inflight' AND lease_until < ?",
+		sqlite_config_.message_index_table
 	);
 
-	auto [ok, error] = db_.execute(update_sql);
-	if (!ok)
+	auto [update_stmt, update_prep_error] = db_.prepare(update_sql);
+	if (!update_stmt)
 	{
-		return { 0, error };
+		return { 0, update_prep_error };
+	}
+	update_stmt->bind_int64(1, now);
+	update_stmt->bind_int64(2, now);
+
+	if (update_stmt->step() != SQLITE_DONE)
+	{
+		return { 0, "recover expired leases failed" };
 	}
 
 	return { count, std::nullopt };
@@ -844,16 +948,21 @@ auto HybridAdapter::process_delayed_messages(void) -> std::tuple<int32_t, std::o
 
 	// First count how many will be affected
 	std::string count_sql = std::format(
-		"SELECT COUNT(*) FROM {} WHERE state = 'delayed' AND available_at <= {}",
-		sqlite_config_.message_index_table,
-		now
+		"SELECT COUNT(*) FROM {} WHERE state = 'delayed' AND available_at <= ?",
+		sqlite_config_.message_index_table
 	);
 
-	auto [count_result, count_error] = db_.query(count_sql);
-	int32_t count = 0;
-	if (count_result.has_value() && !count_result->rows.empty())
+	auto [count_stmt, count_prep_error] = db_.prepare(count_sql);
+	if (!count_stmt)
 	{
-		count = std::stoi(count_result->rows[0][0]);
+		return { 0, count_prep_error };
+	}
+	count_stmt->bind_int64(1, now);
+
+	int32_t count = 0;
+	if (count_stmt->step() == SQLITE_ROW)
+	{
+		count = count_stmt->column_int(0);
 	}
 
 	if (count == 0)
@@ -862,15 +971,20 @@ auto HybridAdapter::process_delayed_messages(void) -> std::tuple<int32_t, std::o
 	}
 
 	std::string update_sql = std::format(
-		"UPDATE {} SET state = 'ready' WHERE state = 'delayed' AND available_at <= {}",
-		sqlite_config_.message_index_table,
-		now
+		"UPDATE {} SET state = 'ready' WHERE state = 'delayed' AND available_at <= ?",
+		sqlite_config_.message_index_table
 	);
 
-	auto [ok, error] = db_.execute(update_sql);
-	if (!ok)
+	auto [update_stmt, update_prep_error] = db_.prepare(update_sql);
+	if (!update_stmt)
 	{
-		return { 0, error };
+		return { 0, update_prep_error };
+	}
+	update_stmt->bind_int64(1, now);
+
+	if (update_stmt->step() != SQLITE_DONE)
+	{
+		return { 0, "process delayed messages failed" };
 	}
 
 	return { count, std::nullopt };
@@ -891,27 +1005,24 @@ auto HybridAdapter::get_expired_inflight_messages(void)
 	auto now = current_time_ms();
 
 	std::string sql = std::format(
-		"SELECT message_key, queue, attempt FROM {} WHERE state = 'inflight' AND lease_until < {}",
-		sqlite_config_.message_index_table,
-		now
+		"SELECT message_key, queue, attempt FROM {} WHERE state = 'inflight' AND lease_until < ?",
+		sqlite_config_.message_index_table
 	);
 
-	auto [query_result, query_error] = db_.query(sql);
-	if (!query_result.has_value())
+	auto [stmt, prep_error] = db_.prepare(sql);
+	if (!stmt)
 	{
-		return { expired, query_error };
+		return { expired, prep_error };
 	}
+	stmt->bind_int64(1, now);
 
-	for (const auto& row : query_result->rows)
+	while (stmt->step() == SQLITE_ROW)
 	{
-		if (row.size() >= 3)
-		{
-			ExpiredLeaseInfo info;
-			info.message_key = row[0];
-			info.queue = row[1];
-			info.attempt = std::stoi(row[2]);
-			expired.push_back(info);
-		}
+		ExpiredLeaseInfo info;
+		info.message_key = stmt->column_text(0);
+		info.queue = stmt->column_text(1);
+		info.attempt = stmt->column_int(2);
+		expired.push_back(info);
 	}
 
 	return { expired, std::nullopt };
@@ -933,14 +1044,25 @@ auto HybridAdapter::delay_message(const std::string& message_key, int64_t delay_
 	std::string new_state = (delay_ms > 0) ? "delayed" : "ready";
 
 	std::string update_sql = std::format(
-		"UPDATE {} SET state = '{}', lease_until = NULL, available_at = {} WHERE message_key = '{}'",
-		sqlite_config_.message_index_table,
-		new_state,
-		available_at,
-		message_key
+		"UPDATE {} SET state = ?, lease_until = NULL, available_at = ? WHERE message_key = ?",
+		sqlite_config_.message_index_table
 	);
 
-	return db_.execute(update_sql);
+	auto [stmt, prep_error] = db_.prepare(update_sql);
+	if (!stmt)
+	{
+		return { false, prep_error };
+	}
+	stmt->bind_text(1, new_state);
+	stmt->bind_int64(2, available_at);
+	stmt->bind_text(3, message_key);
+
+	if (stmt->step() != SQLITE_DONE)
+	{
+		return { false, "delay message failed" };
+	}
+
+	return { true, std::nullopt };
 }
 
 auto HybridAdapter::move_to_dlq(const std::string& message_key, const std::string& reason)
@@ -962,41 +1084,57 @@ auto HybridAdapter::move_to_dlq(const std::string& message_key, const std::strin
 	}
 
 	std::string check_sql = std::format(
-		"SELECT queue FROM {} WHERE message_key = '{}'",
-		sqlite_config_.message_index_table,
-		message_key
+		"SELECT queue FROM {} WHERE message_key = ?",
+		sqlite_config_.message_index_table
 	);
 
-	auto [check_result, check_error] = db_.query(check_sql);
-	std::string queue;
-	if (check_result.has_value() && !check_result->rows.empty())
-	{
-		queue = check_result->rows[0][0];
-	}
-
-	std::string update_idx = std::format(
-		"UPDATE {} SET state = 'dlq', lease_until = NULL WHERE message_key = '{}'",
-		sqlite_config_.message_index_table,
-		message_key
-	);
-
-	auto [idx_ok, idx_error] = db_.execute(update_idx);
-	if (!idx_ok)
+	auto [check_stmt, check_prep_error] = db_.prepare(check_sql);
+	if (!check_stmt)
 	{
 		db_.rollback();
-		return { false, idx_error };
+		return { false, check_prep_error };
+	}
+	check_stmt->bind_text(1, message_key);
+
+	std::string queue;
+	if (check_stmt->step() == SQLITE_ROW)
+	{
+		queue = check_stmt->column_text(0);
 	}
 
-	std::string update_kv = std::format(
-		"UPDATE {} SET value = json_set(value, '$.dlqReason', '{}', '$.dlqAt', {}), updated_at = {} WHERE key = '{}'",
-		sqlite_config_.kv_table,
-		reason,
-		now,
-		now,
-		message_key
+	std::string update_idx_sql = std::format(
+		"UPDATE {} SET state = 'dlq', lease_until = NULL WHERE message_key = ?",
+		sqlite_config_.message_index_table
 	);
 
-	db_.execute(update_kv);
+	auto [idx_stmt, idx_prep_error] = db_.prepare(update_idx_sql);
+	if (!idx_stmt)
+	{
+		db_.rollback();
+		return { false, idx_prep_error };
+	}
+	idx_stmt->bind_text(1, message_key);
+
+	if (idx_stmt->step() != SQLITE_DONE)
+	{
+		db_.rollback();
+		return { false, "update to dlq failed" };
+	}
+
+	std::string update_kv_sql = std::format(
+		"UPDATE {} SET value = json_set(value, '$.dlqReason', ?, '$.dlqAt', ?), updated_at = ? WHERE key = ?",
+		sqlite_config_.kv_table
+	);
+
+	auto [kv_stmt, kv_prep_error] = db_.prepare(update_kv_sql);
+	if (kv_stmt)
+	{
+		kv_stmt->bind_text(1, reason);
+		kv_stmt->bind_int64(2, now);
+		kv_stmt->bind_int64(3, now);
+		kv_stmt->bind_text(4, message_key);
+		kv_stmt->step();
+	}
 
 	auto [commit_ok, commit_error] = db_.commit();
 	if (!commit_ok)
@@ -1143,31 +1281,26 @@ auto HybridAdapter::list_dlq_messages(const std::string& queue, int32_t limit)
 
 	std::string sql = std::format(
 		"SELECT message_key, queue, dlq_reason, dlq_at, attempt FROM {} "
-		"WHERE queue = '{}' AND state = 'dlq' ORDER BY dlq_at DESC LIMIT {}",
-		sqlite_config_.message_index_table,
-		queue,
-		limit
+		"WHERE queue = ? AND state = 'dlq' ORDER BY dlq_at DESC LIMIT ?",
+		sqlite_config_.message_index_table
 	);
 
-	auto [result, error] = db_.query(sql);
-	if (!result.has_value())
+	auto [stmt, prep_error] = db_.prepare(sql);
+	if (!stmt)
 	{
-		return { dlq_list, error };
+		return { dlq_list, prep_error };
 	}
+	stmt->bind_text(1, queue);
+	stmt->bind_int(2, limit);
 
-	for (const auto& row : result->rows)
+	while (stmt->step() == SQLITE_ROW)
 	{
-		if (row.size() < 5)
-		{
-			continue;
-		}
-
 		DlqMessageInfo info;
-		info.message_key = row[0];
-		info.queue = row[1];
-		info.reason = row[2];
-		info.dlq_at_ms = row[3].empty() ? 0 : std::stoll(row[3]);
-		info.attempt = row[4].empty() ? 0 : std::stoi(row[4]);
+		info.message_key = stmt->column_text(0);
+		info.queue = stmt->column_text(1);
+		info.reason = stmt->column_text(2);
+		info.dlq_at_ms = stmt->column_int64(3);
+		info.attempt = stmt->column_int(4);
 		dlq_list.push_back(info);
 	}
 
@@ -1194,45 +1327,62 @@ auto HybridAdapter::reprocess_dlq_message(const std::string& message_key)
 
 	// Get queue info first
 	std::string check_sql = std::format(
-		"SELECT queue FROM {} WHERE message_key = '{}' AND state = 'dlq'",
-		sqlite_config_.message_index_table,
-		message_key
+		"SELECT queue FROM {} WHERE message_key = ? AND state = 'dlq'",
+		sqlite_config_.message_index_table
 	);
 
-	auto [check_result, check_error] = db_.query(check_sql);
-	if (!check_result.has_value() || check_result->rows.empty())
+	auto [check_stmt, check_prep_error] = db_.prepare(check_sql);
+	if (!check_stmt)
+	{
+		db_.rollback();
+		return { false, check_prep_error };
+	}
+	check_stmt->bind_text(1, message_key);
+
+	if (check_stmt->step() != SQLITE_ROW)
 	{
 		db_.rollback();
 		return { false, "DLQ message not found" };
 	}
 
-	std::string queue = check_result->rows[0][0];
+	std::string queue = check_stmt->column_text(0);
 
 	// Reset state to ready
-	std::string update_idx = std::format(
-		"UPDATE {} SET state = 'ready', lease_until = NULL, available_at = {}, "
-		"attempt = 0, dlq_reason = NULL, dlq_at = NULL WHERE message_key = '{}'",
-		sqlite_config_.message_index_table,
-		now,
-		message_key
+	std::string update_idx_sql = std::format(
+		"UPDATE {} SET state = 'ready', lease_until = NULL, available_at = ?, "
+		"attempt = 0, dlq_reason = NULL, dlq_at = NULL WHERE message_key = ?",
+		sqlite_config_.message_index_table
 	);
 
-	auto [idx_ok, idx_error] = db_.execute(update_idx);
-	if (!idx_ok)
+	auto [idx_stmt, idx_prep_error] = db_.prepare(update_idx_sql);
+	if (!idx_stmt)
 	{
 		db_.rollback();
-		return { false, idx_error };
+		return { false, idx_prep_error };
+	}
+	idx_stmt->bind_int64(1, now);
+	idx_stmt->bind_text(2, message_key);
+
+	if (idx_stmt->step() != SQLITE_DONE)
+	{
+		db_.rollback();
+		return { false, "update index for reprocess failed" };
 	}
 
 	// Update KV to remove DLQ fields
-	std::string update_kv = std::format(
+	std::string update_kv_sql = std::format(
 		"UPDATE {} SET value = json_remove(json_set(value, '$.attempt', 0), '$.dlqReason', '$.dlqAt'), "
-		"updated_at = {} WHERE key = '{}'",
-		sqlite_config_.kv_table,
-		now,
-		message_key
+		"updated_at = ? WHERE key = ?",
+		sqlite_config_.kv_table
 	);
-	db_.execute(update_kv);
+
+	auto [kv_stmt, kv_prep_error] = db_.prepare(update_kv_sql);
+	if (kv_stmt)
+	{
+		kv_stmt->bind_int64(1, now);
+		kv_stmt->bind_text(2, message_key);
+		kv_stmt->step();
+	}
 
 	auto [commit_ok, commit_error] = db_.commit();
 	if (!commit_ok)
@@ -1267,14 +1417,15 @@ auto HybridAdapter::get_all_queues(void) -> std::vector<std::string>
 		sqlite_config_.message_index_table
 	);
 
-	auto [result, error] = db_.query(sql);
-	if (result.has_value())
+	auto [stmt, prep_error] = db_.prepare(sql);
+	if (stmt)
 	{
-		for (const auto& row : result->rows)
+		while (stmt->step() == SQLITE_ROW)
 		{
-			if (!row.empty() && !row[0].empty())
+			std::string q = stmt->column_text(0);
+			if (!q.empty())
 			{
-				queues.push_back(row[0]);
+				queues.push_back(q);
 			}
 		}
 	}
@@ -1333,38 +1484,53 @@ auto HybridAdapter::get_indexed_message_ids(const std::string& queue, const std:
 {
 	std::vector<std::string> message_ids;
 
-	std::string sql;
 	if (state.empty())
 	{
-		sql = std::format(
-			"SELECT message_key FROM {} WHERE queue = '{}'",
-			sqlite_config_.message_index_table,
-			queue
+		std::string sql = std::format(
+			"SELECT message_key FROM {} WHERE queue = ?",
+			sqlite_config_.message_index_table
 		);
+
+		auto [stmt, prep_error] = db_.prepare(sql);
+		if (!stmt)
+		{
+			return { message_ids, prep_error };
+		}
+		stmt->bind_text(1, queue);
+
+		while (stmt->step() == SQLITE_ROW)
+		{
+			std::string key = stmt->column_text(0);
+			if (!key.empty())
+			{
+				auto message_id = extract_message_id_from_key(key);
+				message_ids.push_back(message_id);
+			}
+		}
 	}
 	else
 	{
-		sql = std::format(
-			"SELECT message_key FROM {} WHERE queue = '{}' AND state = '{}'",
-			sqlite_config_.message_index_table,
-			queue,
-			state
+		std::string sql = std::format(
+			"SELECT message_key FROM {} WHERE queue = ? AND state = ?",
+			sqlite_config_.message_index_table
 		);
-	}
 
-	auto [result, error] = db_.query(sql);
-	if (!result.has_value())
-	{
-		return { message_ids, error };
-	}
-
-	for (const auto& row : result->rows)
-	{
-		if (!row.empty() && !row[0].empty())
+		auto [stmt, prep_error] = db_.prepare(sql);
+		if (!stmt)
 		{
-			// Extract message_id from message_key (format: msg:queue:message_id)
-			auto message_id = extract_message_id_from_key(row[0]);
-			message_ids.push_back(message_id);
+			return { message_ids, prep_error };
+		}
+		stmt->bind_text(1, queue);
+		stmt->bind_text(2, state);
+
+		while (stmt->step() == SQLITE_ROW)
+		{
+			std::string key = stmt->column_text(0);
+			if (!key.empty())
+			{
+				auto message_id = extract_message_id_from_key(key);
+				message_ids.push_back(message_id);
+			}
 		}
 	}
 
@@ -1408,40 +1574,44 @@ auto HybridAdapter::check_consistency(const std::string& queue)
 
 		// Filter by state: ready, inflight, delayed should have payload in active/
 		std::string active_sql = std::format(
-			"SELECT message_key FROM {} WHERE queue = '{}' AND state IN ('ready', 'inflight', 'delayed')",
-			sqlite_config_.message_index_table,
-			q
+			"SELECT message_key FROM {} WHERE queue = ? AND state IN ('ready', 'inflight', 'delayed')",
+			sqlite_config_.message_index_table
 		);
 
-		auto [active_result, active_error] = db_.query(active_sql);
+		auto [active_stmt, active_prep_error] = db_.prepare(active_sql);
 		std::vector<std::string> indexed_active_ids;
-		if (active_result.has_value())
+		if (active_stmt)
 		{
-			for (const auto& row : active_result->rows)
+			active_stmt->bind_text(1, q);
+
+			while (active_stmt->step() == SQLITE_ROW)
 			{
-				if (!row.empty())
+				std::string key = active_stmt->column_text(0);
+				if (!key.empty())
 				{
-					indexed_active_ids.push_back(extract_message_id_from_key(row[0]));
+					indexed_active_ids.push_back(extract_message_id_from_key(key));
 				}
 			}
 		}
 
 		// Get DLQ indexed messages
 		std::string dlq_sql = std::format(
-			"SELECT message_key FROM {} WHERE queue = '{}' AND state = 'dlq'",
-			sqlite_config_.message_index_table,
-			q
+			"SELECT message_key FROM {} WHERE queue = ? AND state = 'dlq'",
+			sqlite_config_.message_index_table
 		);
 
-		auto [dlq_result, dlq_error] = db_.query(dlq_sql);
+		auto [dlq_stmt, dlq_prep_error] = db_.prepare(dlq_sql);
 		std::vector<std::string> indexed_dlq_ids;
-		if (dlq_result.has_value())
+		if (dlq_stmt)
 		{
-			for (const auto& row : dlq_result->rows)
+			dlq_stmt->bind_text(1, q);
+
+			while (dlq_stmt->step() == SQLITE_ROW)
 			{
-				if (!row.empty())
+				std::string key = dlq_stmt->column_text(0);
+				if (!key.empty())
 				{
-					indexed_dlq_ids.push_back(extract_message_id_from_key(row[0]));
+					indexed_dlq_ids.push_back(extract_message_id_from_key(key));
 				}
 			}
 		}
@@ -1598,29 +1768,39 @@ auto HybridAdapter::repair_consistency(const ConsistencyReport& report)
 					envelope["createdAt"] = now;
 					envelope["repairedAt"] = now;
 
-					std::string insert_kv = std::format(
+					std::string insert_kv_sql = std::format(
 						"INSERT OR IGNORE INTO {} (key, value, value_type, created_at, updated_at) "
-						"VALUES ('{}', '{}', 'message', {}, {})",
-						sqlite_config_.kv_table,
-						issue.message_key,
-						envelope.dump(),
-						now,
-						now
+						"VALUES (?, ?, 'message', ?, ?)",
+						sqlite_config_.kv_table
 					);
 
-					auto [kv_ok, kv_error] = db_.execute(insert_kv);
+					auto [kv_stmt, kv_prep_error] = db_.prepare(insert_kv_sql);
+					bool kv_ok = false;
+					if (kv_stmt)
+					{
+						kv_stmt->bind_text(1, issue.message_key);
+						kv_stmt->bind_text(2, envelope.dump());
+						kv_stmt->bind_int64(3, now);
+						kv_stmt->bind_int64(4, now);
+						kv_ok = (kv_stmt->step() == SQLITE_DONE);
+					}
 
 					// Create index entry
-					std::string insert_idx = std::format(
+					std::string insert_idx_sql = std::format(
 						"INSERT OR IGNORE INTO {} (queue, state, priority, available_at, attempt, message_key) "
-						"VALUES ('{}', 'ready', 0, {}, 0, '{}')",
-						sqlite_config_.message_index_table,
-						issue.queue,
-						now,
-						issue.message_key
+						"VALUES (?, 'ready', 0, ?, 0, ?)",
+						sqlite_config_.message_index_table
 					);
 
-					auto [idx_ok, idx_error] = db_.execute(insert_idx);
+					auto [idx_stmt, idx_prep_error] = db_.prepare(insert_idx_sql);
+					bool idx_ok = false;
+					if (idx_stmt)
+					{
+						idx_stmt->bind_text(1, issue.queue);
+						idx_stmt->bind_int64(2, now);
+						idx_stmt->bind_text(3, issue.message_key);
+						idx_ok = (idx_stmt->step() == SQLITE_DONE);
+					}
 
 					if (kv_ok || idx_ok)
 					{
@@ -1646,21 +1826,25 @@ auto HybridAdapter::repair_consistency(const ConsistencyReport& report)
 		{
 			// Move to DLQ or delete index entry
 			std::string update_sql = std::format(
-				"UPDATE {} SET state = 'dlq', dlq_reason = 'missing_payload', dlq_at = {} "
-				"WHERE message_key = '{}'",
-				sqlite_config_.message_index_table,
-				now,
-				issue.message_key
+				"UPDATE {} SET state = 'dlq', dlq_reason = 'missing_payload', dlq_at = ? "
+				"WHERE message_key = ?",
+				sqlite_config_.message_index_table
 			);
 
-			auto [ok, error] = db_.execute(update_sql);
-			if (ok)
+			auto [stmt, prep_error] = db_.prepare(update_sql);
+			if (stmt)
 			{
-				repaired++;
-				Utilities::Logger::handle().write(
-					Utilities::LogTypes::Information,
-					std::format("Moved message with missing payload to DLQ: {}", issue.message_key)
-				);
+				stmt->bind_int64(1, now);
+				stmt->bind_text(2, issue.message_key);
+
+				if (stmt->step() == SQLITE_DONE)
+				{
+					repaired++;
+					Utilities::Logger::handle().write(
+						Utilities::LogTypes::Information,
+						std::format("Moved message with missing payload to DLQ: {}", issue.message_key)
+					);
+				}
 			}
 			break;
 		}
@@ -1684,16 +1868,20 @@ auto HybridAdapter::repair_consistency(const ConsistencyReport& report)
 		{
 			// Reset to ready state
 			std::string update_sql = std::format(
-				"UPDATE {} SET state = 'ready', available_at = {} WHERE message_key = '{}'",
-				sqlite_config_.message_index_table,
-				now,
-				issue.message_key
+				"UPDATE {} SET state = 'ready', available_at = ? WHERE message_key = ?",
+				sqlite_config_.message_index_table
 			);
 
-			auto [ok, error] = db_.execute(update_sql);
-			if (ok)
+			auto [stmt, prep_error] = db_.prepare(update_sql);
+			if (stmt)
 			{
-				repaired++;
+				stmt->bind_int64(1, now);
+				stmt->bind_text(2, issue.message_key);
+
+				if (stmt->step() == SQLITE_DONE)
+				{
+					repaired++;
+				}
 			}
 			break;
 		}
@@ -1727,17 +1915,17 @@ auto HybridAdapter::purge_expired_messages(void) -> std::tuple<int32_t, std::opt
 
 	// Get expired message keys and their queues for payload file cleanup
 	std::string select_sql = std::format(
-		"SELECT message_key, queue FROM {} WHERE expired_at > 0 AND expired_at <= {} AND state IN ('ready', 'delayed')",
-		sqlite_config_.message_index_table,
-		now
+		"SELECT message_key, queue FROM {} WHERE expired_at > 0 AND expired_at <= ? AND state IN ('ready', 'delayed')",
+		sqlite_config_.message_index_table
 	);
 
-	auto [query_result, query_error] = db_.query(select_sql);
-	if (!query_result.has_value() || query_result->rows.empty())
+	auto [select_stmt, select_prep_error] = db_.prepare(select_sql);
+	if (!select_stmt)
 	{
 		db_.rollback();
-		return { 0, std::nullopt };
+		return { 0, select_prep_error };
 	}
+	select_stmt->bind_int64(1, now);
 
 	struct ExpiredInfo
 	{
@@ -1746,37 +1934,51 @@ auto HybridAdapter::purge_expired_messages(void) -> std::tuple<int32_t, std::opt
 	};
 
 	std::vector<ExpiredInfo> expired_list;
-	for (const auto& row : query_result->rows)
+	while (select_stmt->step() == SQLITE_ROW)
 	{
-		if (row.size() >= 2)
-		{
-			expired_list.push_back({ row[0], row[1] });
-		}
+		expired_list.push_back({ select_stmt->column_text(0), select_stmt->column_text(1) });
+	}
+
+	if (expired_list.empty())
+	{
+		db_.rollback();
+		return { 0, std::nullopt };
 	}
 
 	// Delete from msg_index
 	std::string delete_idx_sql = std::format(
-		"DELETE FROM {} WHERE expired_at > 0 AND expired_at <= {} AND state IN ('ready', 'delayed')",
-		sqlite_config_.message_index_table,
-		now
+		"DELETE FROM {} WHERE expired_at > 0 AND expired_at <= ? AND state IN ('ready', 'delayed')",
+		sqlite_config_.message_index_table
 	);
 
-	auto [del_ok, del_error] = db_.execute(delete_idx_sql);
-	if (!del_ok)
+	auto [del_idx_stmt, del_idx_prep_error] = db_.prepare(delete_idx_sql);
+	if (!del_idx_stmt)
 	{
 		db_.rollback();
-		return { 0, del_error };
+		return { 0, del_idx_prep_error };
+	}
+	del_idx_stmt->bind_int64(1, now);
+
+	if (del_idx_stmt->step() != SQLITE_DONE)
+	{
+		db_.rollback();
+		return { 0, "delete expired index entries failed" };
 	}
 
 	// Delete from kv table
+	std::string delete_kv_sql = std::format(
+		"DELETE FROM {} WHERE key = ?",
+		sqlite_config_.kv_table
+	);
+
 	for (const auto& info : expired_list)
 	{
-		std::string delete_kv_sql = std::format(
-			"DELETE FROM {} WHERE key = '{}'",
-			sqlite_config_.kv_table,
-			info.message_key
-		);
-		db_.execute(delete_kv_sql);
+		auto [kv_stmt, kv_prep_error] = db_.prepare(delete_kv_sql);
+		if (kv_stmt)
+		{
+			kv_stmt->bind_text(1, info.message_key);
+			kv_stmt->step();
+		}
 	}
 
 	auto [commit_ok, commit_error] = db_.commit();

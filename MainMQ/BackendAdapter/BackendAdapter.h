@@ -191,6 +191,39 @@ public:
 	// TTL: purge expired messages (ready/delayed only, not inflight)
 	virtual auto purge_expired_messages(void) -> std::tuple<int32_t, std::optional<std::string>> = 0;
 
+	// Batch operations (default: iterate single operations)
+	virtual auto batch_enqueue(const std::vector<MessageEnvelope>& messages)
+		-> std::tuple<int32_t, std::optional<std::string>>
+	{
+		int32_t success_count = 0;
+		for (const auto& msg : messages)
+		{
+			auto [ok, error] = enqueue(msg);
+			if (ok)
+			{
+				success_count++;
+			}
+		}
+		return { success_count, std::nullopt };
+	}
+
+	virtual auto batch_lease_next(const std::string& queue, const std::string& consumer_id,
+		const int32_t& visibility_timeout_sec, int32_t max_messages)
+		-> std::tuple<std::vector<LeaseResult>, std::optional<std::string>>
+	{
+		std::vector<LeaseResult> results;
+		for (int32_t i = 0; i < max_messages; ++i)
+		{
+			auto result = lease_next(queue, consumer_id, visibility_timeout_sec);
+			if (!result.leased)
+			{
+				break;
+			}
+			results.push_back(result);
+		}
+		return { results, std::nullopt };
+	}
+
 	// Consistency check and repair (optional, for Hybrid/FileSystem backends)
 	virtual auto check_consistency(const std::string& queue = "")
 		-> std::tuple<ConsistencyReport, std::optional<std::string>>

@@ -2,19 +2,14 @@
 
 #include "ArgumentParser.h"
 #include "LogTypes.h"
+#include "MailboxClient.h"
 
 #include <string>
 
 using namespace Utilities;
 
-// IPC communication settings
-struct MailboxConfig
-{
-	std::string root = "./ipc";
-	std::string requests_dir = "requests";
-	std::string responses_dir = "responses";
-	int32_t timeout_ms = 30000;
-};
+// IPC communication settings (alias for common library type)
+using MailboxConfig = MailboxIPC::ClientConfig;
 
 class Configurations
 {

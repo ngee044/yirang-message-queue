@@ -67,21 +67,6 @@ auto main(int argc, char* argv[]) -> int
 
 	Logger::handle().write(LogTypes::Information, "Backend initialized successfully");
 
-	// Register queues from configuration
-	for (auto& queue_config : configurations_->queues())
-	{
-		auto [saved, save_error] = adapter->save_policy(queue_config.name, queue_config.policy);
-		if (saved)
-		{
-			Logger::handle().write(LogTypes::Information, std::format("Registered queue: {}", queue_config.name));
-		}
-		else
-		{
-			Logger::handle().write(LogTypes::Error, std::format("Failed to register queue {}: {}",
-				queue_config.name, save_error.value_or("unknown")));
-		}
-	}
-
 	// Initialize QueueManager
 	QueueManagerConfig mgr_config;
 	mgr_config.lease_sweep_interval_ms = configurations_->lease_sweep_interval_ms();

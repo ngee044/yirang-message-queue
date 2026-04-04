@@ -1,122 +1,15 @@
 #include "Configurations.h"
-#include "Generator.h"
 #include "Logger.h"
+#include "MailboxClient.h"
 
 #include <nlohmann/json.hpp>
 
-#include <chrono>
-#include <filesystem>
-#include <fstream>
 #include <format>
 #include <string>
-#include <thread>
 
 using json = nlohmann::json;
 using namespace Utilities;
 
-auto current_time_ms() -> int64_t
-{
-	return std::chrono::duration_cast<std::chrono::milliseconds>(
-		std::chrono::system_clock::now().time_since_epoch()
-	).count();
-}
-
-auto atomic_write(const std::string& target_path, const std::string& content) -> bool
-{
-	auto temp_path = target_path + ".tmp";
-
-	std::ofstream file(temp_path, std::ios::out | std::ios::trunc);
-	if (!file.is_open())
-	{
-		Logger::handle().write(LogTypes::Error, std::format("Cannot create temp file: {}", temp_path));
-		return false;
-	}
-
-	file << content;
-	file.flush();
-	file.close();
-
-	std::error_code ec;
-	std::filesystem::rename(temp_path, target_path, ec);
-	if (ec)
-	{
-		std::filesystem::remove(temp_path, ec);
-		Logger::handle().write(LogTypes::Error, std::format("Rename failed: {}", ec.message()));
-		return false;
-	}
-
-	return true;
-}
-
-auto send_request(const MailboxConfig& config, const std::string& client_id, const std::string& command, const json& payload, int32_t timeout_ms)
-	-> std::tuple<bool, json>
-{
-	auto request_id = Generator::guid();
-	auto now = current_time_ms();
-	auto deadline = now + timeout_ms;
-
-	// Build request JSON
-	json request;
-	request["requestId"] = request_id;
-	request["clientId"] = client_id;
-	request["command"] = command;
-	request["timestampMs"] = now;
-	request["deadlineMs"] = deadline;
-	request["payload"] = payload;
-
-	// Ensure directories exist
-	std::filesystem::path requests_path = config.root;
-	requests_path /= config.requests_dir;
-
-	std::filesystem::path responses_path = config.root;
-	responses_path /= config.responses_dir;
-	responses_path /= client_id;
-
-	std::error_code ec;
-	std::filesystem::create_directories(requests_path, ec);
-	std::filesystem::create_directories(responses_path, ec);
-
-	// Write request file
-	auto request_file = (requests_path / std::format("{}.json", request_id)).string();
-	if (!atomic_write(request_file, request.dump(2)))
-	{
-		return { false, { { "error", "failed to write request" } } };
-	}
-
-	// Wait for response
-	auto response_file = (responses_path / std::format("{}.json", request_id)).string();
-	auto start_time = current_time_ms();
-
-	while (current_time_ms() - start_time < timeout_ms)
-	{
-		if (std::filesystem::exists(response_file, ec))
-		{
-			std::ifstream file(response_file);
-			if (file.is_open())
-			{
-				std::string content((std::istreambuf_iterator<char>(file)),
-					std::istreambuf_iterator<char>());
-				file.close();
-
-				// Delete response file after reading
-				std::filesystem::remove(response_file, ec);
-
-				try
-				{
-					return { true, json::parse(content) };
-				}
-				catch (const json::exception& e)
-				{
-					return { false, { { "error", std::format("response parse error: {}", e.what()) } } };
-				}
-			}
-		}
-
-		std::this_thread::sleep_for(std::chrono::milliseconds(50));
-	}
-
-	return { false, { { "error", "timeout waiting for response" } } };
-}
 
 auto print_usage() -> void
 {
@@ -206,7 +99,7 @@ auto cmd_consume(ArgumentParser& args, Configurations& config) -> int
 	payload["consumerId"] = config.consumer_id();
 	payload["visibilityTimeoutSec"] = config.visibility_timeout_sec();
 
-	auto [ok, response] = send_request(
+	auto [ok, response] = MailboxIPC::send_request(
 		config.mailbox_config(),
 		config.consumer_id(),
 		"consume_next",
@@ -268,7 +161,7 @@ auto cmd_ack(ArgumentParser& args, Configurations& config) -> int
 	}
 	payload["consumerId"] = config.consumer_id();
 
-	auto [ok, response] = send_request(
+	auto [ok, response] = MailboxIPC::send_request(
 		config.mailbox_config(),
 		config.consumer_id(),
 		"ack",
@@ -322,7 +215,7 @@ auto cmd_nack(ArgumentParser& args, Configurations& config) -> int
 	payload["reason"] = reason.value_or("");
 	payload["requeue"] = requeue;
 
-	auto [ok, response] = send_request(
+	auto [ok, response] = MailboxIPC::send_request(
 		config.mailbox_config(),
 		config.consumer_id(),
 		"nack",
@@ -374,7 +267,7 @@ auto cmd_extend_lease(ArgumentParser& args, Configurations& config) -> int
 	payload["consumerId"] = config.consumer_id();
 	payload["visibilityTimeoutSec"] = visibility.value_or(config.visibility_timeout_sec());
 
-	auto [ok, response] = send_request(
+	auto [ok, response] = MailboxIPC::send_request(
 		config.mailbox_config(),
 		config.consumer_id(),
 		"extend_lease",
@@ -421,7 +314,7 @@ auto cmd_list_dlq(ArgumentParser& args, Configurations& config) -> int
 	payload["queue"] = queue;
 	payload["limit"] = limit.value_or(100);
 
-	auto [ok, response] = send_request(
+	auto [ok, response] = MailboxIPC::send_request(
 		config.mailbox_config(),
 		config.consumer_id(),
 		"list_dlq",
@@ -469,7 +362,7 @@ auto cmd_reprocess(ArgumentParser& args, Configurations& config) -> int
 	json payload;
 	payload["messageKey"] = message_key.value();
 
-	auto [ok, response] = send_request(
+	auto [ok, response] = MailboxIPC::send_request(
 		config.mailbox_config(),
 		config.consumer_id(),
 		"reprocess_dlq",

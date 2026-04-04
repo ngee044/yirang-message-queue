@@ -13,10 +13,11 @@ namespace fs = std::filesystem;
 // ---------------------------------------------------------------------------
 static auto find_schema_path() -> std::string
 {
-	// Check current directory
-	if (fs::exists("sqlite_schema.sql"))
+	// Check current directory (use absolute path for Docker compatibility)
+	auto cwd_candidate = fs::current_path() / "sqlite_schema.sql";
+	if (fs::exists(cwd_candidate))
 	{
-		return "sqlite_schema.sql";
+		return cwd_candidate.string();
 	}
 
 	// Check next to executable (common when run via ctest from build/out)

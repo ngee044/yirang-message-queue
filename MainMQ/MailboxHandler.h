@@ -76,6 +76,8 @@ private:
 	auto handle_metrics(const MailboxRequest& request) -> MailboxResponse;
 	auto handle_list_dlq(const MailboxRequest& request) -> MailboxResponse;
 	auto handle_reprocess_dlq(const MailboxRequest& request) -> MailboxResponse;
+	auto handle_batch_publish(const MailboxRequest& request) -> MailboxResponse;
+	auto handle_batch_consume(const MailboxRequest& request) -> MailboxResponse;
 
 	// Response building
 	auto build_success_response(const std::string& request_id, const std::string& data_json = "{}") -> MailboxResponse;

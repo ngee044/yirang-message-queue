@@ -267,6 +267,16 @@ auto MailboxHandler::process_pending_requests(void) -> void
 		}
 	}
 
+	// Track peak pending depth
+	{
+		std::lock_guard<std::mutex> lock(metrics_mutex_);
+		auto depth = static_cast<uint64_t>(requests_to_process.size());
+		if (depth > metrics_.peak_pending_depth)
+		{
+			metrics_.peak_pending_depth = depth;
+		}
+	}
+
 	for (const auto& file_path : requests_to_process)
 	{
 		if (!running_.load())
@@ -298,7 +308,8 @@ auto MailboxHandler::process_pending_requests(void) -> void
 			continue;
 		}
 
-		// Read and parse request
+		// Phase 1: Parse request
+		auto parse_start = current_time_ms();
 		auto [request_opt, read_error] = read_request_file(processing_path);
 		if (!request_opt.has_value())
 		{
@@ -309,6 +320,7 @@ auto MailboxHandler::process_pending_requests(void) -> void
 			move_to_dead(processing_path, read_error.value_or("parse error"));
 			continue;
 		}
+		auto parse_end = current_time_ms();
 
 		auto& request = request_opt.value();
 
@@ -329,14 +341,19 @@ auto MailboxHandler::process_pending_requests(void) -> void
 			continue;
 		}
 
-		// Handle request
+		// Phase 2: Backend operation
+		auto backend_start = current_time_ms();
 		auto response = handle_request(request);
+		auto backend_end = current_time_ms();
 
 		// Record metrics
 		record_request_end(request.command, response.ok, response.error_code, start_time);
 
-		// Write response
+		// Phase 3: Write response
+		auto write_start = current_time_ms();
 		auto [write_ok, write_error] = write_response_file(request.client_id, response);
+		auto write_end = current_time_ms();
+
 		if (!write_ok)
 		{
 			Utilities::Logger::handle().write(
@@ -344,6 +361,14 @@ auto MailboxHandler::process_pending_requests(void) -> void
 				std::format("Failed to write response for request {}: {}",
 					request.request_id, write_error.value_or("unknown"))
 			);
+		}
+
+		// Record phase-level timing
+		{
+			std::lock_guard<std::mutex> mlock(metrics_mutex_);
+			metrics_.total_parse_time_ms += static_cast<uint64_t>(parse_end - parse_start);
+			metrics_.total_backend_time_ms += static_cast<uint64_t>(backend_end - backend_start);
+			metrics_.total_response_write_time_ms += static_cast<uint64_t>(write_end - write_start);
 		}
 
 		// Delete processed file
@@ -705,6 +730,14 @@ auto MailboxHandler::parse_command(const std::string& command_str) -> MailboxCom
 	{
 		return MailboxCommand::ReprocessDlq;
 	}
+	else if (cmd == "batch_publish" || cmd == "batchpublish")
+	{
+		return MailboxCommand::BatchPublish;
+	}
+	else if (cmd == "batch_consume" || cmd == "batchconsume")
+	{
+		return MailboxCommand::BatchConsume;
+	}
 
 	return MailboxCommand::Unknown;
 }
@@ -733,6 +766,10 @@ auto MailboxHandler::handle_request(const MailboxRequest& request) -> MailboxRes
 		return handle_list_dlq(request);
 	case MailboxCommand::ReprocessDlq:
 		return handle_reprocess_dlq(request);
+	case MailboxCommand::BatchPublish:
+		return handle_batch_publish(request);
+	case MailboxCommand::BatchConsume:
+		return handle_batch_consume(request);
 	default:
 		return build_error_response(request.request_id, MailboxErrorCode::UNKNOWN_COMMAND, "unknown command");
 	}
@@ -839,12 +876,21 @@ auto MailboxHandler::handle_consume_next(const MailboxRequest& request) -> Mailb
 		if (result.message.has_value())
 		{
 			auto& msg = result.message.value();
+
+			// Parse payload/attributes as JSON objects (not escaped strings)
+			json payload_obj;
+			json attributes_obj;
+			try { payload_obj = json::parse(msg.payload_json); }
+			catch (...) { payload_obj = msg.payload_json; }
+			try { attributes_obj = json::parse(msg.attributes_json); }
+			catch (...) { attributes_obj = msg.attributes_json; }
+
 			response_data["message"] = {
 				{ "messageId", msg.message_id },
 				{ "messageKey", msg.key },
 				{ "queue", msg.queue },
-				{ "payload", msg.payload_json },
-				{ "attributes", msg.attributes_json },
+				{ "payload", payload_obj },
+				{ "attributes", attributes_obj },
 				{ "priority", msg.priority },
 				{ "attempt", msg.attempt },
 				{ "createdAt", msg.created_at_ms }
@@ -1284,7 +1330,14 @@ auto MailboxHandler::handle_metrics(const MailboxRequest& request) -> MailboxRes
 	result["timing"] = {
 		{ "totalProcessingMs", metrics_.total_processing_time_ms },
 		{ "avgProcessingMs", avg_processing_ms },
-		{ "lastRequestMs", metrics_.last_request_time_ms }
+		{ "lastRequestMs", metrics_.last_request_time_ms },
+		{ "totalParseMs", metrics_.total_parse_time_ms },
+		{ "totalBackendMs", metrics_.total_backend_time_ms },
+		{ "totalResponseWriteMs", metrics_.total_response_write_time_ms }
+	};
+
+	result["queue"] = {
+		{ "peakPendingDepth", metrics_.peak_pending_depth }
 	};
 
 	return build_success_response(request.request_id, result.dump());
@@ -1358,7 +1411,165 @@ auto MailboxHandler::record_request_end(MailboxCommand command, bool success, co
 	case MailboxCommand::ReprocessDlq:
 		metrics_.dlq_count++;
 		break;
+	case MailboxCommand::BatchPublish:
+		metrics_.publish_count++;
+		break;
+	case MailboxCommand::BatchConsume:
+		metrics_.consume_count++;
+		break;
 	default:
 		break;
+	}
+}
+
+auto MailboxHandler::handle_batch_publish(const MailboxRequest& request) -> MailboxResponse
+{
+	try
+	{
+		json payload = json::parse(request.payload_json);
+
+		std::string queue = payload.value("queue", "");
+		if (queue.empty())
+		{
+			return build_error_response(request.request_id, MailboxErrorCode::INVALID_REQUEST, "queue is required");
+		}
+
+		if (!payload.contains("messages") || !payload["messages"].is_array())
+		{
+			return build_error_response(request.request_id, MailboxErrorCode::INVALID_REQUEST, "messages array is required");
+		}
+
+		auto& messages_array = payload["messages"];
+		std::vector<MessageEnvelope> envelopes;
+
+		auto now = current_time_ms();
+		int32_t default_priority = payload.value("priority", 0);
+
+		for (const auto& msg_json : messages_array)
+		{
+			MessageEnvelope envelope;
+			envelope.message_id = generate_uuid();
+			envelope.key = std::format("msg:{}:{}", queue, envelope.message_id);
+			envelope.queue = queue;
+			envelope.payload_json = msg_json.contains("message") ? msg_json["message"].dump() : msg_json.dump();
+			envelope.attributes_json = msg_json.contains("attributes") ? msg_json["attributes"].dump() : "{}";
+			envelope.priority = msg_json.value("priority", default_priority);
+			envelope.created_at_ms = now;
+
+			int64_t delay_ms = msg_json.value("delayMs", static_cast<int64_t>(0));
+			envelope.available_at_ms = now + delay_ms;
+
+			envelope.target_consumer_id = msg_json.value("targetConsumerId", "");
+
+			// TTL
+			auto policy = queue_manager_->get_policy(queue);
+			if (policy.has_value() && policy->ttl_sec > 0)
+			{
+				envelope.expired_at_ms = now + (static_cast<int64_t>(policy->ttl_sec) * 1000);
+			}
+
+			// Validate if schema exists
+			if (validator_.has_schema(queue))
+			{
+				auto validation = validator_.validate(envelope);
+				if (!validation.valid)
+				{
+					continue; // Skip invalid messages in batch
+				}
+			}
+
+			envelopes.push_back(envelope);
+		}
+
+		auto [success_count, error] = backend_->batch_enqueue(envelopes);
+
+		json result;
+		result["published"] = success_count;
+		result["total"] = static_cast<int32_t>(messages_array.size());
+		result["skipped"] = static_cast<int32_t>(messages_array.size()) - static_cast<int32_t>(envelopes.size());
+
+		return build_success_response(request.request_id, result.dump());
+	}
+	catch (const json::exception& e)
+	{
+		return build_error_response(request.request_id, MailboxErrorCode::PARSE_ERROR,
+			std::format("batch publish parse error: {}", e.what()));
+	}
+}
+
+auto MailboxHandler::handle_batch_consume(const MailboxRequest& request) -> MailboxResponse
+{
+	try
+	{
+		json payload = json::parse(request.payload_json);
+
+		std::string queue = payload.value("queue", "");
+		if (queue.empty())
+		{
+			return build_error_response(request.request_id, MailboxErrorCode::INVALID_REQUEST, "queue is required");
+		}
+
+		std::string consumer_id = payload.value("consumerId", "");
+		int32_t visibility_timeout = payload.value("visibilityTimeoutSec", 30);
+		int32_t max_messages = payload.value("maxMessages", 10);
+
+		if (max_messages <= 0)
+		{
+			max_messages = 1;
+		}
+		if (max_messages > 100)
+		{
+			max_messages = 100;
+		}
+
+		auto [results, error] = backend_->batch_lease_next(queue, consumer_id, visibility_timeout, max_messages);
+
+		json response_data;
+		json messages_array = json::array();
+
+		for (const auto& result : results)
+		{
+			if (result.leased && result.message.has_value() && result.lease.has_value())
+			{
+				auto& msg = result.message.value();
+				auto& lease = result.lease.value();
+
+				json payload_obj;
+				json attributes_obj;
+				try { payload_obj = json::parse(msg.payload_json); }
+				catch (...) { payload_obj = msg.payload_json; }
+				try { attributes_obj = json::parse(msg.attributes_json); }
+				catch (...) { attributes_obj = msg.attributes_json; }
+
+				json item;
+				item["message"] = {
+					{ "messageId", msg.message_id },
+					{ "messageKey", msg.key },
+					{ "queue", msg.queue },
+					{ "payload", payload_obj },
+					{ "attributes", attributes_obj },
+					{ "priority", msg.priority },
+					{ "attempt", msg.attempt },
+					{ "createdAt", msg.created_at_ms }
+				};
+				item["lease"] = {
+					{ "leaseId", lease.lease_id },
+					{ "messageKey", lease.message_key },
+					{ "consumerId", lease.consumer_id },
+					{ "leaseUntil", lease.lease_until_ms }
+				};
+				messages_array.push_back(item);
+			}
+		}
+
+		response_data["messages"] = messages_array;
+		response_data["count"] = static_cast<int32_t>(messages_array.size());
+
+		return build_success_response(request.request_id, response_data.dump());
+	}
+	catch (const json::exception& e)
+	{
+		return build_error_response(request.request_id, MailboxErrorCode::PARSE_ERROR,
+			std::format("batch consume parse error: {}", e.what()));
 	}
 }

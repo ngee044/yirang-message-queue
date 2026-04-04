@@ -672,7 +672,9 @@ yirang-mq/
 
 - [운영 가이드](docs/OPERATIONS.md) - 디렉토리 구조, 백업, 모니터링
 - [장애 대응](docs/TROUBLESHOOTING.md) - 문제 해결 시나리오
-- [코드 컨벤션](CODE_CONVENTIONS.md) - 개발 가이드라인
+- [코드 컨벤션](docs/CODE_CONVENTIONS.md) - 개발 가이드라인
+- [기술 부채 우선순위](docs/TECH_DEBT_PRIORITIES.md) - 기술 부채 관리
+- [TODO](docs/TODO.md) - 작업 추적
 
 ---
 

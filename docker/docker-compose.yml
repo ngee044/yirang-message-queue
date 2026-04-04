@@ -69,6 +69,34 @@ services:
       yirangmq:
         condition: service_healthy
 
+  # ============================================================
+  # Unit Test Runner
+  # ============================================================
+  yirangmq-unit-test:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: test-runner
+    image: yirangmq-test:unit
+    container_name: yirangmq-unit-test
+    profiles:
+      - test
+
+  # ============================================================
+  # Integration Test Runner
+  # ============================================================
+  yirangmq-integration-test:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: integration-test
+    image: yirangmq-test:integration
+    container_name: yirangmq-integration-test
+    profiles:
+      - test
+    environment:
+      - YIRANGMQ_BACKEND=sqlite
+
 volumes:
   yirangmq-data:
     name: yirangmq-data

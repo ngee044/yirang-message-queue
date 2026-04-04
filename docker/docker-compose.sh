@@ -41,6 +41,11 @@ print_usage() {
     echo "  list-dlq      List messages in dead letter queue"
     echo "  reprocess     Reprocess a DLQ message"
     echo ""
+    echo "Test Commands:"
+    echo "  test            Run all tests (unit + integration)"
+    echo "  test-unit       Run unit tests only"
+    echo "  test-integration Run integration tests only"
+    echo ""
     echo "Interactive:"
     echo "  cli       Open CLI shell (interactive)"
     echo ""
@@ -173,6 +178,26 @@ case "${1:-help}" in
         fi
         log_info "Reprocessing DLQ message: $MESSAGE_KEY"
         docker compose exec yirangmq /app/yirangmq-cli-consumer reprocess --message-key "$MESSAGE_KEY"
+        ;;
+
+    # Test commands
+    test)
+        log_info "Running all tests (unit + integration) in Docker..."
+        log_info "Phase 1: Unit tests..."
+        docker compose build yirangmq-unit-test 2>&1
+        log_pass_or_fail "Unit tests" $?
+        log_info "Phase 2: Integration tests..."
+        docker compose run --rm yirangmq-integration-test
+        ;;
+
+    test-unit)
+        log_info "Running unit tests in Docker..."
+        docker compose build yirangmq-unit-test
+        ;;
+
+    test-integration)
+        log_info "Running integration tests in Docker..."
+        docker compose run --rm yirangmq-integration-test "$@"
         ;;
 
     clean)

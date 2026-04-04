@@ -60,6 +60,7 @@ logs/
 .codexignore
 .cursorignore
 CLAUDE.md
+AGENTS.md
 docs/
 ipc_fault_test/
 data_fault_test/

@@ -33,15 +33,62 @@ ENV VCPKG_ROOT=/opt/vcpkg
 WORKDIR /app
 COPY . .
 
-# Install dependencies and build
+# Install dependencies and build (with tests)
 RUN cmake -B build -S . \
     -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_TOOLCHAIN_FILE=/opt/vcpkg/scripts/buildsystems/vcpkg.cmake \
+    -DBUILD_TESTS=ON \
     && cmake --build build -j $(nproc)
 
 # ============================================================
-# Stage 2: Runtime
+# Stage 2: Test Runner
+# ============================================================
+FROM builder AS test-runner
+
+WORKDIR /app
+
+# Run unit tests as part of the build verification
+# This stage can be targeted with: docker build --target test-runner
+RUN ctest --test-dir build --output-on-failure
+
+# ============================================================
+# Stage 3: Integration Test Environment
+# ============================================================
+FROM ubuntu:24.04 AS integration-test
+
+RUN apt-get update && apt-get install -y \
+    libsqlite3-0 \
+    liblz4-1 \
+    jq \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN useradd -m -s /bin/bash yirangmq
+
+RUN mkdir -p /app/data /app/logs /app/ipc/requests /app/ipc/responses && \
+    chown -R yirangmq:yirangmq /app
+
+WORKDIR /app
+
+# Copy daemon, CLI tools, AND test executables
+COPY --from=builder /app/build/out/ /app/
+COPY --from=builder /app/MainMQ/sqlite_schema.sql /app/
+
+# Disable FolderWatcher for Docker
+RUN sed -i 's/"useFolderWatcher": true/"useFolderWatcher": false/' /app/main_mq_configuration.json
+
+# Copy integration test script
+COPY docker/integration-test.sh /app/integration-test.sh
+RUN chmod +x /app/integration-test.sh
+
+RUN chown -R yirangmq:yirangmq /app
+
+USER yirangmq
+
+ENTRYPOINT ["/app/integration-test.sh"]
+
+# ============================================================
+# Stage 4: Runtime (Production)
 # ============================================================
 FROM ubuntu:24.04 AS runtime
 

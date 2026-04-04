@@ -13,8 +13,9 @@ cmake-build-*/
 .git/
 .gitignore
 
-# Docker
-docker/
+# Docker (keep test scripts accessible for integration-test stage)
+docker/*
+!docker/integration-test.sh
 
 # Data & logs (runtime)
 data/

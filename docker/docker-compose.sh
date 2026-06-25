@@ -67,6 +67,14 @@ print_usage() {
 log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+log_pass_or_fail() {
+    if [ "${2:-1}" -eq 0 ]; then
+        log_info "$1: PASS"
+    else
+        log_error "$1: FAIL (exit ${2:-1})"
+        exit "${2:-1}"
+    fi
+}
 
 case "${1:-help}" in
     up)
@@ -187,6 +195,8 @@ case "${1:-help}" in
         docker compose build yirangmq-unit-test 2>&1
         log_pass_or_fail "Unit tests" $?
         log_info "Phase 2: Integration tests..."
+        docker compose build yirangmq-integration-test 2>&1
+        log_pass_or_fail "Integration build" $?
         docker compose run --rm yirangmq-integration-test
         ;;
 

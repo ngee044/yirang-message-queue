@@ -151,6 +151,7 @@ if [[ "$RUN_INTEGRATION" == true ]]; then
                 if [[ -z "$MSG_KEY" ]]; then
                     MSG_KEY=$(echo "$CONSUME" | grep -o '"message_key"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)
                 fi
+                LEASE_ID=$(echo "$CONSUME" | grep -o '"leaseId"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)
             else
                 log_fail "IT-04: Consume message — unexpected response"
             fi
@@ -161,7 +162,7 @@ if [[ "$RUN_INTEGRATION" == true ]]; then
         # --- Test 5: ACK ---
         if [[ -n "$MSG_KEY" ]]; then
             log_info "[IT-05] ACK message ($MSG_KEY)..."
-            if ACK=$(/app/yirangmq-cli-consumer ack --message-key "$MSG_KEY" --timeout 10000 2>&1) && echo "$ACK" | grep -qi 'acknowledged\|"ok"\|"status"'; then
+            if ACK=$(/app/yirangmq-cli-consumer ack --message-key "$MSG_KEY" --lease-id "$LEASE_ID" --timeout 10000 2>&1) && echo "$ACK" | grep -qi 'acknowledged\|"ok"\|"status"'; then
                 log_pass "IT-05: ACK message"
             else
                 log_fail "IT-05: ACK message — $ACK"

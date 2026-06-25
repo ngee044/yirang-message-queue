@@ -16,8 +16,6 @@ set(TEST_SOURCES
 	TestConfigurations.cpp
 	TestMailboxHandler.cpp
 	TestBackendContract.cpp
-	TestGenerator.cpp
-	TestJob.cpp
 	TestFile.cpp
 	TestLogger.cpp
 )

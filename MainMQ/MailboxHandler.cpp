@@ -637,6 +637,34 @@ auto MailboxHandler::delete_processed(const std::string& processing_file)
 	return { true, std::nullopt };
 }
 
+namespace
+{
+	auto is_safe_path_component(const std::string& value) -> bool
+	{
+		if (value.empty() || value.size() > 128)
+		{
+			return false;
+		}
+
+		if (value == "." || value == "..")
+		{
+			return false;
+		}
+
+		for (const char character : value)
+		{
+			const bool allowed = (character >= 'A' && character <= 'Z') || (character >= 'a' && character <= 'z')
+				|| (character >= '0' && character <= '9') || character == '.' || character == '_' || character == '-';
+			if (!allowed)
+			{
+				return false;
+			}
+		}
+
+		return true;
+	}
+}
+
 auto MailboxHandler::parse_request(const std::string& json_content, const std::string& file_path)
 	-> std::tuple<std::optional<MailboxRequest>, std::optional<std::string>>
 {
@@ -652,12 +680,20 @@ auto MailboxHandler::parse_request(const std::string& json_content, const std::s
 			return { std::nullopt, "missing requestId" };
 		}
 		request.request_id = req_json["requestId"].get<std::string>();
+		if (!is_safe_path_component(request.request_id))
+		{
+			return { std::nullopt, "invalid requestId" };
+		}
 
 		if (!req_json.contains("clientId") || !req_json["clientId"].is_string())
 		{
 			return { std::nullopt, "missing clientId" };
 		}
 		request.client_id = req_json["clientId"].get<std::string>();
+		if (!is_safe_path_component(request.client_id))
+		{
+			return { std::nullopt, "invalid clientId" };
+		}
 
 		if (!req_json.contains("command") || !req_json["command"].is_string())
 		{

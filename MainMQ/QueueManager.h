@@ -44,6 +44,7 @@ private:
 private:
 	std::atomic<bool> running_;
 	QueueManagerConfig config_;
+	QueuePolicy default_policy_;
 	std::shared_ptr<BackendAdapter> backend_;
 	std::shared_ptr<Thread::ThreadPool> thread_pool_;
 	std::map<std::string, QueuePolicy> queue_policies_;

@@ -337,6 +337,11 @@ auto FileSystemAdapter::ack(const LeaseToken& lease) -> std::tuple<bool, std::op
 
 	auto& meta = meta_opt.value();
 
+	if (!lease.lease_id.empty() && meta.lease_id != lease.lease_id)
+	{
+		return { false, "lease_id mismatch (stale or forged lease token)" };
+	}
+
 	// Verify lease
 	auto now = current_time_ms();
 	if (now > meta.lease_until_ms)
@@ -392,6 +397,11 @@ auto FileSystemAdapter::nack(const LeaseToken& lease, const std::string& reason,
 	}
 
 	auto& meta = meta_opt.value();
+
+	if (!lease.lease_id.empty() && meta.lease_id != lease.lease_id)
+	{
+		return { false, "lease_id mismatch (stale or forged lease token)" };
+	}
 
 	// Extract filename from message key
 	auto parts = lease.message_key.rfind(':');
@@ -467,6 +477,11 @@ auto FileSystemAdapter::extend_lease(const LeaseToken& lease, const int32_t& vis
 	}
 
 	auto& meta = meta_opt.value();
+
+	if (!lease.lease_id.empty() && meta.lease_id != lease.lease_id)
+	{
+		return { false, "lease_id mismatch (stale or forged lease token)" };
+	}
 
 	// Verify consumer
 	if (meta.consumer_id != lease.consumer_id)

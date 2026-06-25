@@ -47,6 +47,7 @@ namespace Utilities
 	auto File::open(const std::string& path, const std::ios_base::openmode& mode, const std::locale& locale) -> std::tuple<bool, std::optional<std::string>>
 	{
 		file_path_ = path;
+		openmode_ = mode;
 
 		std::filesystem::path target_path(file_path_);
 		if (target_path.parent_path().empty() != true)
@@ -270,6 +271,7 @@ namespace Utilities
 		stream_.close();
 
 		file_path_ = "";
+		openmode_ = std::ios_base::openmode();
 	}
 
 	auto File::compression(const std::string& path, const uint16_t& block_bytes) -> std::tuple<bool, std::optional<std::string>>

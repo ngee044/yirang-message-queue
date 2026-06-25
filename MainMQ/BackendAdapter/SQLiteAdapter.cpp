@@ -38,6 +38,22 @@ namespace
 		).count();
 	}
 
+	auto affected_rows(DataBase::SQLite& db) -> int32_t
+	{
+		auto [stmt, error] = db.prepare("SELECT changes();");
+		if (!stmt)
+		{
+			return -1;
+		}
+
+		if (stmt->step() == SQLITE_ROW)
+		{
+			return stmt->column_int(0);
+		}
+
+		return -1;
+	}
+
 	auto state_to_string(MessageState state) -> std::string
 	{
 		switch (state)
@@ -291,9 +307,9 @@ auto SQLiteAdapter::lease_next(const std::string& queue, const std::string& cons
 	int32_t priority = select_stmt->column_int(1);
 	int32_t attempt = select_stmt->column_int(2);
 
-	// Update state to inflight
+	auto lease_id = Utilities::Generator::guid();
 	std::string update_sql = std::format(
-		"UPDATE {} SET state = 'inflight', lease_until = ?, attempt = ? WHERE message_key = ?;",
+		"UPDATE {} SET state = 'inflight', lease_until = ?, attempt = ?, lease_id = ? WHERE message_key = ?;",
 		sqlite_config_.message_index_table
 	);
 
@@ -307,7 +323,8 @@ auto SQLiteAdapter::lease_next(const std::string& queue, const std::string& cons
 
 	update_stmt->bind_int64(1, lease_until);
 	update_stmt->bind_int(2, attempt + 1);
-	update_stmt->bind_text(3, message_key);
+	update_stmt->bind_text(3, lease_id);
+	update_stmt->bind_text(4, message_key);
 
 	if (update_stmt->step() != SQLITE_DONE)
 	{
@@ -365,7 +382,7 @@ auto SQLiteAdapter::lease_next(const std::string& queue, const std::string& cons
 		msg.created_at_ms = envelope.value("createdAt", static_cast<int64_t>(0));
 
 		LeaseToken lease;
-		lease.lease_id = Utilities::Generator::guid();
+		lease.lease_id = lease_id;
 		lease.message_key = message_key;
 		lease.consumer_id = consumer_id;
 		lease.lease_until_ms = lease_until;
@@ -399,7 +416,7 @@ auto SQLiteAdapter::ack(const LeaseToken& lease) -> std::tuple<bool, std::option
 
 	// Delete from msg_index (CASCADE will not delete kv, so delete explicitly)
 	std::string idx_sql = std::format(
-		"DELETE FROM {} WHERE message_key = ? AND state = 'inflight';",
+		"DELETE FROM {} WHERE message_key = ? AND state = 'inflight' AND (? = '' OR lease_id = ?);",
 		sqlite_config_.message_index_table
 	);
 
@@ -411,11 +428,19 @@ auto SQLiteAdapter::ack(const LeaseToken& lease) -> std::tuple<bool, std::option
 	}
 
 	idx_stmt->bind_text(1, lease.message_key);
+	idx_stmt->bind_text(2, lease.lease_id);
+	idx_stmt->bind_text(3, lease.lease_id);
 
 	if (idx_stmt->step() != SQLITE_DONE)
 	{
 		db_.rollback();
 		return { false, "failed to delete from msg_index" };
+	}
+
+	if (affected_rows(db_) == 0)
+	{
+		db_.rollback();
+		return { false, "ack rejected: message is not inflight (lease expired or already settled)" };
 	}
 
 	// Delete from kv table
@@ -471,7 +496,7 @@ auto SQLiteAdapter::nack(const LeaseToken& lease, const std::string& reason, con
 
 		// Return to ready state
 		std::string sql = std::format(
-			"UPDATE {} SET state = 'ready', lease_until = NULL, available_at = ? WHERE message_key = ? AND state = 'inflight';",
+			"UPDATE {} SET state = 'ready', lease_until = NULL, lease_id = '', available_at = ? WHERE message_key = ? AND state = 'inflight' AND (? = '' OR lease_id = ?);",
 			sqlite_config_.message_index_table
 		);
 
@@ -484,11 +509,19 @@ auto SQLiteAdapter::nack(const LeaseToken& lease, const std::string& reason, con
 
 		stmt->bind_int64(1, now);
 		stmt->bind_text(2, lease.message_key);
+		stmt->bind_text(3, lease.lease_id);
+		stmt->bind_text(4, lease.lease_id);
 
 		if (stmt->step() != SQLITE_DONE)
 		{
 			db_.rollback();
 			return { false, "failed to requeue message" };
+		}
+
+		if (affected_rows(db_) == 0)
+		{
+			db_.rollback();
+			return { false, "nack rejected: message is not inflight (lease expired or already settled)" };
 		}
 
 		auto [commit_ok, commit_error] = db_.commit();
@@ -509,7 +542,7 @@ auto SQLiteAdapter::nack(const LeaseToken& lease, const std::string& reason, con
 
 		// Update state to dlq
 		std::string idx_sql = std::format(
-			"UPDATE {} SET state = 'dlq', lease_until = NULL WHERE message_key = ? AND state = 'inflight';",
+			"UPDATE {} SET state = 'dlq', lease_until = NULL WHERE message_key = ? AND state = 'inflight' AND (? = '' OR lease_id = ?);",
 			sqlite_config_.message_index_table
 		);
 
@@ -521,11 +554,19 @@ auto SQLiteAdapter::nack(const LeaseToken& lease, const std::string& reason, con
 		}
 
 		idx_stmt->bind_text(1, lease.message_key);
+		idx_stmt->bind_text(2, lease.lease_id);
+		idx_stmt->bind_text(3, lease.lease_id);
 
 		if (idx_stmt->step() != SQLITE_DONE)
 		{
 			db_.rollback();
 			return { false, "failed to move message to dlq" };
+		}
+
+		if (affected_rows(db_) == 0)
+		{
+			db_.rollback();
+			return { false, "nack rejected: message is not inflight (lease expired or already settled)" };
 		}
 
 		// Update kv value with nack reason
@@ -603,7 +644,7 @@ auto SQLiteAdapter::extend_lease(const LeaseToken& lease, const int32_t& visibil
 	auto new_lease_until = now + (static_cast<int64_t>(visibility_timeout_sec) * 1000);
 
 	std::string sql = std::format(
-		"UPDATE {} SET lease_until = ? WHERE message_key = ? AND state = 'inflight' AND lease_until > ?;",
+		"UPDATE {} SET lease_until = ? WHERE message_key = ? AND state = 'inflight' AND lease_until > ? AND (? = '' OR lease_id = ?);",
 		sqlite_config_.message_index_table
 	);
 
@@ -617,11 +658,19 @@ auto SQLiteAdapter::extend_lease(const LeaseToken& lease, const int32_t& visibil
 	stmt->bind_int64(1, new_lease_until);
 	stmt->bind_text(2, lease.message_key);
 	stmt->bind_int64(3, now);
+	stmt->bind_text(4, lease.lease_id);
+	stmt->bind_text(5, lease.lease_id);
 
 	if (stmt->step() != SQLITE_DONE)
 	{
 		db_.rollback();
 		return { false, "failed to extend lease" };
+	}
+
+	if (affected_rows(db_) == 0)
+	{
+		db_.rollback();
+		return { false, "extend_lease rejected: lease not held or already expired" };
 	}
 
 	auto [commit_ok, commit_error] = db_.commit();

@@ -13,6 +13,16 @@ QueueManager::QueueManager(std::shared_ptr<BackendAdapter> backend, const QueueM
 			: running_(false), config_(config), backend_(backend)
 		{
 			thread_pool_ = std::make_shared<Thread::ThreadPool>("QueueManager");
+
+			default_policy_.visibility_timeout_sec = 30;
+			default_policy_.ttl_sec = 0;
+			default_policy_.retry.limit = 5;
+			default_policy_.retry.backoff = "exponential";
+			default_policy_.retry.initial_delay_sec = 1;
+			default_policy_.retry.max_delay_sec = 60;
+			default_policy_.dlq.enabled = true;
+			default_policy_.dlq.queue = "";
+			default_policy_.dlq.retention_days = 7;
 		}
 
 		QueueManager::~QueueManager(void) { stop(); }
@@ -180,19 +190,7 @@ QueueManager::QueueManager(std::shared_ptr<BackendAdapter> backend, const QueueM
 
 			for (const auto& info : expired_list)
 			{
-				// Get policy for this queue
-				auto policy_opt = get_policy(info.queue);
-				if (!policy_opt.has_value())
-				{
-					auto [ok, err] = backend_->delay_message(info.message_key, 0);
-					if (ok)
-					{
-						recovered_count++;
-					}
-					continue;
-				}
-
-				auto& policy = policy_opt.value();
+				QueuePolicy policy = get_policy(info.queue).value_or(default_policy_);
 
 				// Apply retry or DLQ logic based on attempt count
 				auto [ok, result_msg] = apply_retry_or_dlq(info.message_key, info.queue, info.attempt, policy);

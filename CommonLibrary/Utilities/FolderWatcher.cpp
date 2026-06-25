@@ -42,7 +42,7 @@ namespace Utilities
 		file_watcher_.reset();
 	}
 
-	auto FolderWatcher::handleFileAction(efsw::WatchID watch_id, const std::string& dir, const std::string& filename, efsw::Action action, std::string old_filename)
+	auto FolderWatcher::handleFileAction(efsw::WatchID watch_id, const std::string& dir, const std::string& filename, efsw::Action action, const std::string& old_filename)
 		-> void
 	{
 		if (callback_ == nullptr)

@@ -381,7 +381,7 @@ auto HybridAdapter::lease_next(const std::string& queue, const std::string& cons
 	int32_t attempt = select_stmt->column_int(1);
 
 	std::string update_sql = std::format(
-		"UPDATE {} SET state = 'inflight', lease_until = ?, attempt = ? WHERE message_key = ?",
+		"UPDATE {} SET state = 'inflight', lease_until = ?, attempt = ?, lease_id = ? WHERE message_key = ?",
 		sqlite_config_.message_index_table
 	);
 
@@ -394,7 +394,8 @@ auto HybridAdapter::lease_next(const std::string& queue, const std::string& cons
 	}
 	update_stmt->bind_int64(1, lease_until);
 	update_stmt->bind_int(2, attempt + 1);
-	update_stmt->bind_text(3, message_key);
+	update_stmt->bind_text(3, lease_id);
+	update_stmt->bind_text(4, message_key);
 
 	if (update_stmt->step() != SQLITE_DONE)
 	{
@@ -488,7 +489,7 @@ auto HybridAdapter::ack(const LeaseToken& lease) -> std::tuple<bool, std::option
 	}
 
 	std::string check_sql = std::format(
-		"SELECT queue FROM {} WHERE message_key = ? AND state = 'inflight'",
+		"SELECT queue FROM {} WHERE message_key = ? AND state = 'inflight' AND (? = '' OR lease_id = ?)",
 		sqlite_config_.message_index_table
 	);
 
@@ -499,11 +500,13 @@ auto HybridAdapter::ack(const LeaseToken& lease) -> std::tuple<bool, std::option
 		return { false, check_prep_error };
 	}
 	check_stmt->bind_text(1, lease.message_key);
+	check_stmt->bind_text(2, lease.lease_id);
+	check_stmt->bind_text(3, lease.lease_id);
 
 	if (check_stmt->step() != SQLITE_ROW)
 	{
 		db_.rollback();
-		return { false, "message not found or not inflight" };
+		return { false, "message not found or not inflight (lease_id mismatch?)" };
 	}
 
 	std::string queue = check_stmt->column_text(0);
@@ -585,7 +588,7 @@ auto HybridAdapter::nack(const LeaseToken& lease, const std::string& reason, con
 	}
 
 	std::string check_sql = std::format(
-		"SELECT queue FROM {} WHERE message_key = ? AND state = 'inflight'",
+		"SELECT queue FROM {} WHERE message_key = ? AND state = 'inflight' AND (? = '' OR lease_id = ?)",
 		sqlite_config_.message_index_table
 	);
 
@@ -596,11 +599,13 @@ auto HybridAdapter::nack(const LeaseToken& lease, const std::string& reason, con
 		return { false, check_prep_error };
 	}
 	check_stmt->bind_text(1, lease.message_key);
+	check_stmt->bind_text(2, lease.lease_id);
+	check_stmt->bind_text(3, lease.lease_id);
 
 	if (check_stmt->step() != SQLITE_ROW)
 	{
 		db_.rollback();
-		return { false, "message not found or not inflight" };
+		return { false, "message not found or not inflight (lease_id mismatch?)" };
 	}
 
 	std::string queue = check_stmt->column_text(0);
@@ -691,7 +696,7 @@ auto HybridAdapter::extend_lease(const LeaseToken& lease, const int32_t& visibil
 	auto new_lease_until = now + (static_cast<int64_t>(visibility_timeout_sec) * 1000);
 
 	std::string update_sql = std::format(
-		"UPDATE {} SET lease_until = ? WHERE message_key = ? AND state = 'inflight' AND lease_until > ?",
+		"UPDATE {} SET lease_until = ? WHERE message_key = ? AND state = 'inflight' AND lease_until > ? AND (? = '' OR lease_id = ?)",
 		sqlite_config_.message_index_table
 	);
 
@@ -703,10 +708,23 @@ auto HybridAdapter::extend_lease(const LeaseToken& lease, const int32_t& visibil
 	stmt->bind_int64(1, new_lease_until);
 	stmt->bind_text(2, lease.message_key);
 	stmt->bind_int64(3, now);
+	stmt->bind_text(4, lease.lease_id);
+	stmt->bind_text(5, lease.lease_id);
 
 	if (stmt->step() != SQLITE_DONE)
 	{
 		return { false, "extend lease failed" };
+	}
+
+	auto [changes_stmt, changes_error] = db_.prepare("SELECT changes();");
+	int32_t changed = 0;
+	if (changes_stmt && changes_stmt->step() == SQLITE_ROW)
+	{
+		changed = changes_stmt->column_int(0);
+	}
+	if (changed == 0)
+	{
+		return { false, "extend_lease rejected: lease not held or already expired" };
 	}
 
 	return { true, std::nullopt };

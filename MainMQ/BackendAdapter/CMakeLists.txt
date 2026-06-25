@@ -29,15 +29,9 @@ target_link_libraries(${LIBRARY_NAME} PUBLIC
 	unofficial::sqlite3::sqlite3
 )
 
-set(RESOURCE_FILES
-	sqlite_schema.sql
+add_custom_command(
+	TARGET ${LIBRARY_NAME} POST_BUILD
+	COMMAND ${CMAKE_COMMAND} -E copy_if_different
+		${CMAKE_SOURCE_DIR}/MainMQ/sqlite_schema.sql
+		${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/sqlite_schema.sql
 )
-
-foreach(RESOURCE_FILE IN LISTS RESOURCE_FILES)
-	add_custom_command(
-		TARGET ${LIBRARY_NAME} POST_BUILD
-		COMMAND ${CMAKE_COMMAND} -E copy_if_different
-			${CMAKE_CURRENT_SOURCE_DIR}/${RESOURCE_FILE}
-			${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/${RESOURCE_FILE}
-	)
-endforeach()

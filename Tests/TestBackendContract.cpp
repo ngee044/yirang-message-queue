@@ -403,6 +403,30 @@ TEST_P(BackendContractTest, BatchLeaseNext)
 }
 
 // ============================================================
+// TC-CONTRACT-15: Stale/forged lease_id rejected (LIM-08 / INC-08 fencing)
+// ============================================================
+TEST_P(BackendContractTest, StaleLeaseAckRejected)
+{
+	backend_->enqueue(make_envelope("contract-q", R"({"v":1})"));
+
+	auto result = backend_->lease_next("contract-q", "worker-1", 30);
+	ASSERT_TRUE(result.leased);
+	ASSERT_TRUE(result.lease.has_value());
+
+	// A token with the correct key/consumer but a wrong (non-empty) lease_id must be
+	// rejected by every backend.
+	LeaseToken forged = result.lease.value();
+	forged.lease_id = "forged-lease-id";
+
+	auto [bad_ok, bad_err] = backend_->ack(forged);
+	EXPECT_FALSE(bad_ok) << "ack with a wrong lease_id must be rejected (fencing)";
+
+	// The genuine lease token still settles the message.
+	auto [ok, err] = backend_->ack(result.lease.value());
+	EXPECT_TRUE(ok) << (err ? *err : "");
+}
+
+// ============================================================
 // Instantiate tests for all 3 backends
 // ============================================================
 INSTANTIATE_TEST_SUITE_P(

@@ -16,6 +16,10 @@ set(TEST_SOURCES
 	TestConfigurations.cpp
 	TestMailboxHandler.cpp
 	TestBackendContract.cpp
+	TestGenerator.cpp
+	TestJob.cpp
+	TestFile.cpp
+	TestLogger.cpp
 )
 
 foreach(TEST_SOURCE IN LISTS TEST_SOURCES)
@@ -32,7 +36,7 @@ endforeach()
 
 # Copy resource files needed by tests
 set(RESOURCE_FILES
-	${CMAKE_SOURCE_DIR}/MainMQ/BackendAdapter/sqlite_schema.sql
+	${CMAKE_SOURCE_DIR}/MainMQ/sqlite_schema.sql
 	${CMAKE_SOURCE_DIR}/MainMQ/main_mq_configuration.json
 )
 

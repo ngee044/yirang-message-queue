@@ -1376,3 +1376,24 @@ TEST_F(MailboxHandlerTest, BatchConsumeReturnsValidResponse)
 	EXPECT_TRUE(data["messages"].is_array());
 	EXPECT_EQ(data["count"].get<int32_t>(), 0); // Empty queue
 }
+
+// ============================================================
+// TC-SEC-01: Path traversal defense in clientId (LIM-11 / INC-11)
+// ============================================================
+TEST_F(MailboxHandlerTest, RejectsPathTraversalInClientId)
+{
+	auto [ok, err] = handler_->start();
+	ASSERT_TRUE(ok);
+
+	// A malicious clientId tries to escape the responses directory.
+	auto req = make_request_json("req-trav-1", "../escape", "health");
+	write_request(req);
+
+	// parse_request must reject it: no response is produced and nothing is
+	// written outside ipc/responses.
+	auto response = wait_for_response("../escape", "req-trav-1", 1500);
+	EXPECT_FALSE(response.has_value()) << "path-traversal request was processed";
+
+	std::error_code ec;
+	EXPECT_FALSE(fs::exists(config_.root + "/escape", ec)) << "response escaped the responses directory";
+}

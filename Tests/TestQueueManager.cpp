@@ -767,11 +767,14 @@ TEST_F(QueueManagerTest, NoExpiredMessagesNoAction)
 	EXPECT_EQ(mock_backend_->get_move_to_dlq_calls().size(), 0u);
 }
 
-TEST_F(QueueManagerTest, ExpiredMessageNoPolicyRecoveredImmediately)
+TEST_F(QueueManagerTest, ExpiredMessageNoPolicyUsesDefaultRetry)
 {
 	queue_manager_ = create_manager();
 
-	// Do NOT register a queue policy — expired message without policy gets delay_message(key, 0)
+	// No registered policy: the default fallback policy applies (retry limit 5,
+	// exponential backoff). attempt=1 (< limit) -> delayed with backoff, not immediate
+	// and not DLQ. Previously this was delay_message(key, 0), enabling infinite
+	// immediate redelivery (LIM/INC fix).
 	std::vector<ExpiredLeaseInfo> expired;
 	expired.push_back({ "msg-nopol", "unregistered-queue", 1 });
 	mock_backend_->set_expired_inflight_messages(expired);
@@ -789,12 +792,48 @@ TEST_F(QueueManagerTest, ExpiredMessageNoPolicyRecoveredImmediately)
 	{
 		if (call.message_key == "msg-nopol")
 		{
-			EXPECT_EQ(call.delay_ms, 0);
+			// exponential backoff: initial(1s) * 2^(attempt-1) = 1s
+			EXPECT_EQ(call.delay_ms, 1000);
 			found = true;
 			break;
 		}
 	}
-	EXPECT_TRUE(found) << "Expected immediate recovery (delay_ms=0) for message without policy";
+	EXPECT_TRUE(found) << "Expected default-policy backoff delay for message without registered policy";
+
+	for (const auto& call : mock_backend_->get_move_to_dlq_calls())
+	{
+		EXPECT_NE(call.message_key, "msg-nopol") << "Below the default limit it must not be DLQ'd";
+	}
+}
+
+TEST_F(QueueManagerTest, ExpiredMessageNoPolicyExhaustsToDefaultDlq)
+{
+	queue_manager_ = create_manager();
+
+	// No registered policy, attempt at the default limit (5) -> DLQ via the default
+	// policy instead of being redelivered forever.
+	std::vector<ExpiredLeaseInfo> expired;
+	expired.push_back({ "msg-nopol-dlq", "unregistered-queue", 5 });
+	mock_backend_->set_expired_inflight_messages(expired);
+
+	auto [started, err] = queue_manager_->start();
+	ASSERT_TRUE(started);
+
+	wait_for_sweep();
+
+	queue_manager_->stop();
+
+	auto dlq_calls = mock_backend_->get_move_to_dlq_calls();
+	bool found = false;
+	for (const auto& call : dlq_calls)
+	{
+		if (call.message_key == "msg-nopol-dlq")
+		{
+			found = true;
+			break;
+		}
+	}
+	EXPECT_TRUE(found) << "Expected default-policy DLQ for unpolicied message at the retry limit";
 }
 
 TEST_F(QueueManagerTest, RetrySweepWorkerCallsProcessDelayed)

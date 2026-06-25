@@ -641,3 +641,59 @@ TEST_F(SQLiteAdapterTest, PurgeDoesNotAffectInflight)
 	auto [metrics, m_err] = adapter_->metrics("ttl-q4");
 	EXPECT_EQ(metrics.inflight, 1u) << "Inflight message should remain";
 }
+
+// ---------------------------------------------------------------------------
+// Schema single-source (PRIMARY KEY) and lease-integrity (affected-row) — LIM/INC
+// ---------------------------------------------------------------------------
+
+TEST_F(SQLiteAdapterTest, DuplicateEnqueueRejected)
+{
+	auto env = make_envelope("dup-queue", R"({"v":1})");
+
+	auto [ok1, e1] = adapter_->enqueue(env);
+	ASSERT_TRUE(ok1) << e1.value_or("");
+
+	// Same message_key again must be rejected by the PRIMARY KEY (canonical schema).
+	auto [ok2, e2] = adapter_->enqueue(env);
+	EXPECT_FALSE(ok2) << "Duplicate message_key must be rejected";
+
+	// Exactly one row was stored.
+	auto r1 = adapter_->lease_next("dup-queue", "c1", 30);
+	ASSERT_TRUE(r1.leased);
+	adapter_->ack(*r1.lease);
+
+	auto r2 = adapter_->lease_next("dup-queue", "c1", 30);
+	EXPECT_FALSE(r2.leased) << "Only one message should have been stored";
+}
+
+TEST_F(SQLiteAdapterTest, AckAfterSettleFails)
+{
+	auto env = make_envelope("ack-queue", R"({"v":1})");
+	ASSERT_TRUE(std::get<0>(adapter_->enqueue(env)));
+
+	auto r = adapter_->lease_next("ack-queue", "c1", 30);
+	ASSERT_TRUE(r.leased);
+
+	auto [ok1, e1] = adapter_->ack(*r.lease);
+	EXPECT_TRUE(ok1) << e1.value_or("");
+
+	// Second ack: the message is no longer inflight -> must fail, not silently succeed.
+	auto [ok2, e2] = adapter_->ack(*r.lease);
+	EXPECT_FALSE(ok2) << "Acking an already-settled message must fail (affected-row check)";
+	EXPECT_TRUE(e2.has_value());
+}
+
+TEST_F(SQLiteAdapterTest, ExtendNonInflightLeaseFails)
+{
+	auto env = make_envelope("ext-queue", R"({"v":1})");
+	ASSERT_TRUE(std::get<0>(adapter_->enqueue(env))); // ready, never leased
+
+	LeaseToken token;
+	token.message_key = env.key;
+	token.consumer_id = "c1";
+	token.lease_until_ms = 0;
+
+	auto [ok, err] = adapter_->extend_lease(token, 30);
+	EXPECT_FALSE(ok) << "Extending a non-inflight message must fail";
+	EXPECT_TRUE(err.has_value());
+}

@@ -672,3 +672,19 @@ TEST_F(HybridAdapterTest, AckNonInflightFails)
 	EXPECT_FALSE(ok) << "Ack should fail for non-inflight message";
 	EXPECT_TRUE(err.has_value());
 }
+
+// extend_lease on a non-inflight message must fail rather than silently succeed (INC).
+TEST_F(HybridAdapterTest, ExtendNonInflightLeaseFails)
+{
+	auto env = make_envelope("ext-test-q", R"({"data":"ext_test"})");
+	ASSERT_TRUE(std::get<0>(adapter_->enqueue(env))); // ready, never leased
+
+	LeaseToken token;
+	token.message_key = env.key;
+	token.consumer_id = "consumer-1";
+	token.lease_until_ms = 0;
+
+	auto [ok, err] = adapter_->extend_lease(token, 30);
+	EXPECT_FALSE(ok) << "Hybrid extend on a non-inflight message must fail";
+	EXPECT_TRUE(err.has_value());
+}

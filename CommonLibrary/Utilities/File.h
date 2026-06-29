@@ -44,4 +44,7 @@ namespace Utilities
 		std::string file_path_;
 		std::ios_base::openmode openmode_;
 	};
+
+	auto fsync_file(const std::string& path) -> void;
+	auto fsync_parent_directory(const std::string& path) -> void;
 }

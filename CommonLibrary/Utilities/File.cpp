@@ -9,8 +9,48 @@
 #include <numeric>
 #include <filesystem>
 
+#if defined(__unix__) || defined(__APPLE__)
+#include <fcntl.h>
+#include <unistd.h>
+#endif
+
 namespace Utilities
 {
+	auto fsync_file(const std::string& path) -> void
+	{
+#if defined(__unix__) || defined(__APPLE__)
+		int fd = ::open(path.c_str(), O_RDONLY);
+		if (fd < 0)
+		{
+			return;
+		}
+		::fsync(fd);
+		::close(fd);
+#else
+		(void)path;
+#endif
+	}
+
+	auto fsync_parent_directory(const std::string& path) -> void
+	{
+#if defined(__unix__) || defined(__APPLE__)
+		auto parent = std::filesystem::path(path).parent_path();
+		if (parent.empty())
+		{
+			parent = ".";
+		}
+		int fd = ::open(parent.c_str(), O_RDONLY);
+		if (fd < 0)
+		{
+			return;
+		}
+		::fsync(fd);
+		::close(fd);
+#else
+		(void)path;
+#endif
+	}
+
 	File::File(void) : file_path_(""), openmode_(std::ios_base::openmode()) {}
 
 	File::File(const std::string& path, const std::ios_base::openmode& mode) : File()

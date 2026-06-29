@@ -223,7 +223,7 @@ namespace Utilities
 		check_life_cycle();
 
 		write_log({ std::dynamic_pointer_cast<Log>(std::make_shared<StringLog>(LogTypes::None, "[START]")) });
-		while (!thread_stop_.load() || !messages_.empty())
+		while (true)
 		{
 			std::unique_lock<std::mutex> unique(mutex_);
 
@@ -238,14 +238,18 @@ namespace Utilities
 
 			std::vector<std::shared_ptr<Log>> messages;
 			messages.swap(messages_);
+			const bool stopping = thread_stop_.load();
 			unique.unlock();
 
-			if (messages.empty())
+			if (!messages.empty())
 			{
-				continue;
+				write_log(messages);
 			}
 
-			write_log(messages);
+			if (stopping && messages.empty())
+			{
+				break;
+			}
 		}
 		write_log({ std::dynamic_pointer_cast<Log>(std::make_shared<StringLog>(LogTypes::None, "[STOP]")) });
 
@@ -493,7 +497,6 @@ namespace Utilities
 			}
 		}
 
-		return std::format("{:%Y-%m-%d}", std::chrono::system_clock::now());
 		return std::format("{:%Y-%m-%d}", std::chrono::system_clock::now());
 	}
 

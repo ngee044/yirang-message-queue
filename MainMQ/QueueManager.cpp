@@ -109,6 +109,7 @@ QueueManager::QueueManager(std::shared_ptr<BackendAdapter> backend, const QueueM
 			}
 
 			running_.store(false);
+			sweep_cv_.notify_all();
 			thread_pool_->stop(true);
 
 			Utilities::Logger::handle().write(Utilities::LogTypes::Information, "QueueManager stopped");
@@ -153,7 +154,8 @@ QueueManager::QueueManager(std::shared_ptr<BackendAdapter> backend, const QueueM
 			while (running_.load())
 			{
 				recover_expired_leases();
-				std::this_thread::sleep_for(std::chrono::milliseconds(config_.lease_sweep_interval_ms));
+				std::unique_lock<std::mutex> lock(sweep_mutex_);
+				sweep_cv_.wait_for(lock, std::chrono::milliseconds(config_.lease_sweep_interval_ms), [this] { return !running_.load(); });
 			}
 		}
 
@@ -162,7 +164,8 @@ QueueManager::QueueManager(std::shared_ptr<BackendAdapter> backend, const QueueM
 			while (running_.load())
 			{
 				process_delayed_messages();
-				std::this_thread::sleep_for(std::chrono::milliseconds(config_.retry_sweep_interval_ms));
+				std::unique_lock<std::mutex> lock(sweep_mutex_);
+				sweep_cv_.wait_for(lock, std::chrono::milliseconds(config_.retry_sweep_interval_ms), [this] { return !running_.load(); });
 			}
 		}
 
@@ -326,7 +329,8 @@ QueueManager::QueueManager(std::shared_ptr<BackendAdapter> backend, const QueueM
 					);
 				}
 
-				std::this_thread::sleep_for(std::chrono::milliseconds(config_.ttl_sweep_interval_ms));
+				std::unique_lock<std::mutex> lock(sweep_mutex_);
+				sweep_cv_.wait_for(lock, std::chrono::milliseconds(config_.ttl_sweep_interval_ms), [this] { return !running_.load(); });
 			}
 		}
 

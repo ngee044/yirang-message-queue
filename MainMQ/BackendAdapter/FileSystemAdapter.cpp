@@ -1,5 +1,7 @@
 #include "FileSystemAdapter.h"
 
+#include "File.h"
+
 #include "Generator.h"
 #include "Logger.h"
 
@@ -968,6 +970,8 @@ auto FileSystemAdapter::atomic_write(const std::string& target_path, const std::
 	file.flush();
 	file.close();
 
+	Utilities::fsync_file(temp_path);
+
 	std::error_code ec;
 	std::filesystem::rename(temp_path, target_path, ec);
 	if (ec)
@@ -975,6 +979,8 @@ auto FileSystemAdapter::atomic_write(const std::string& target_path, const std::
 		std::filesystem::remove(temp_path, ec);
 		return { false, std::format("rename failed: {}", ec.message()) };
 	}
+
+	Utilities::fsync_parent_directory(target_path);
 
 	return { true, std::nullopt };
 }

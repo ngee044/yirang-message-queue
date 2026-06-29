@@ -91,7 +91,7 @@ namespace Utilities
 		bool database_mode_;
 		bool file_backup_mode_;
 		uint16_t write_interval_;
-		uint16_t max_lines_;
+		size_t max_lines_;
 
 		LogTypes file_mode_;
 		LogTypes console_mode_;

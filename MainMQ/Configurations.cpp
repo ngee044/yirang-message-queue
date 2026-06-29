@@ -548,23 +548,28 @@ namespace
 
 			// Validate queues
 			std::set<std::string> seen_names;
+			decltype(queues_) valid_queues;
 			for (auto& queue : queues_)
 			{
 				if (!is_valid_queue_name(queue.name))
 				{
 					Logger::handle().write(LogTypes::Error,
-						std::format("Invalid queue name '{}': must be 1-256 alphanumeric/hyphen/underscore characters", queue.name));
+						std::format("Rejecting queue with invalid name '{}': must be 1-256 alphanumeric/hyphen/underscore characters", queue.name));
+					continue;
 				}
 
 				if (seen_names.find(queue.name) != seen_names.end())
 				{
-					Logger::handle().write(LogTypes::Information,
-						std::format("Duplicate queue name: {}", queue.name));
+					Logger::handle().write(LogTypes::Error,
+						std::format("Rejecting duplicate queue name: {}", queue.name));
+					continue;
 				}
 				seen_names.insert(queue.name);
 
 				validate_queue_policy(queue.policy, std::format("queue '{}'", queue.name));
+				valid_queues.push_back(queue);
 			}
+			queues_ = std::move(valid_queues);
 		}
 
 		auto Configurations::validate_retry_policy(RetryPolicy& policy, const std::string& context) -> void

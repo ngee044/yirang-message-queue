@@ -567,6 +567,8 @@ auto MailboxHandler::atomic_write(const std::string& target_path, const std::str
 	file.flush();
 	file.close();
 
+	Utilities::fsync_file(temp_path);
+
 	std::error_code ec;
 	std::filesystem::rename(temp_path, target_path, ec);
 	if (ec)
@@ -574,6 +576,8 @@ auto MailboxHandler::atomic_write(const std::string& target_path, const std::str
 		std::filesystem::remove(temp_path, ec);
 		return { false, std::format("rename failed: {}", ec.message()) };
 	}
+
+	Utilities::fsync_parent_directory(target_path);
 
 	return { true, std::nullopt };
 }

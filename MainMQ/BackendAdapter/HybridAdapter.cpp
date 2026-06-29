@@ -549,21 +549,19 @@ auto HybridAdapter::ack(const LeaseToken& lease) -> std::tuple<bool, std::option
 		return { false, "delete kv failed" };
 	}
 
+	auto message_id = extract_message_id_from_key(lease.message_key);
+	auto [archive_ok, archive_error] = move_payload_to_archive(queue, message_id);
+	if (!archive_ok)
+	{
+		db_.rollback();
+		return { false, archive_error.value_or("failed to archive payload") };
+	}
+
 	auto [commit_ok, commit_error] = db_.commit();
 	if (!commit_ok)
 	{
 		db_.rollback();
 		return { false, commit_error };
-	}
-
-	auto message_id = extract_message_id_from_key(lease.message_key);
-	auto [archive_ok, archive_error] = move_payload_to_archive(queue, message_id);
-	if (!archive_ok)
-	{
-		Utilities::Logger::handle().write(
-			Utilities::LogTypes::Error,
-			std::format("Failed to archive payload for {}: {}", lease.message_key, archive_error.value_or("unknown"))
-		);
 	}
 
 	return { true, std::nullopt };
@@ -669,7 +667,12 @@ auto HybridAdapter::nack(const LeaseToken& lease, const std::string& reason, con
 		}
 
 		auto message_id = extract_message_id_from_key(lease.message_key);
-		move_payload_to_dlq(queue, message_id);
+		auto [dlq_ok, dlq_error] = move_payload_to_dlq(queue, message_id);
+		if (!dlq_ok)
+		{
+			db_.rollback();
+			return { false, dlq_error.value_or("failed to move payload to dlq") };
+		}
 	}
 
 	auto [commit_ok, commit_error] = db_.commit();
@@ -1154,17 +1157,22 @@ auto HybridAdapter::move_to_dlq(const std::string& message_key, const std::strin
 		kv_stmt->step();
 	}
 
+	if (!queue.empty())
+	{
+		auto message_id = extract_message_id_from_key(message_key);
+		auto [dlq_ok, dlq_error] = move_payload_to_dlq(queue, message_id);
+		if (!dlq_ok)
+		{
+			db_.rollback();
+			return { false, dlq_error.value_or("failed to move payload to dlq") };
+		}
+	}
+
 	auto [commit_ok, commit_error] = db_.commit();
 	if (!commit_ok)
 	{
 		db_.rollback();
 		return { false, commit_error };
-	}
-
-	if (!queue.empty())
-	{
-		auto message_id = extract_message_id_from_key(message_key);
-		move_payload_to_dlq(queue, message_id);
 	}
 
 	return { true, std::nullopt };
@@ -1242,6 +1250,8 @@ auto HybridAdapter::atomic_write(const std::string& target_path, const std::stri
 	file.flush();
 	file.close();
 
+	Utilities::fsync_file(temp_path);
+
 	std::error_code ec;
 	std::filesystem::rename(temp_path, target_path, ec);
 	if (ec)
@@ -1249,6 +1259,8 @@ auto HybridAdapter::atomic_write(const std::string& target_path, const std::stri
 		std::filesystem::remove(temp_path, ec);
 		return { false, std::format("rename failed: {}", ec.message()) };
 	}
+
+	Utilities::fsync_parent_directory(target_path);
 
 	return { true, std::nullopt };
 }

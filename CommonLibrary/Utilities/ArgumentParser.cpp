@@ -238,9 +238,11 @@ namespace Utilities
 				continue;
 			}
 
-			if (index + 1 >= argc)
+			// 값이 없거나 다음 토큰이 또 다른 --옵션이면 불리언 플래그로 처리한다.
+			if (index + 1 >= argc || arguments[index + 1].rfind("--", 0) == 0)
 			{
-				break;
+				result[argument_id] = "true";
+				continue;
 			}
 
 			auto target = result.find(argument_id);

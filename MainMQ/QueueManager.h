@@ -4,6 +4,7 @@
 #include "ThreadPool.h"
 
 #include <atomic>
+#include <condition_variable>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -49,4 +50,6 @@ private:
 	std::shared_ptr<Thread::ThreadPool> thread_pool_;
 	std::map<std::string, QueuePolicy> queue_policies_;
 	std::mutex policies_mutex_;
+	std::condition_variable sweep_cv_;
+	std::mutex sweep_mutex_;
 };

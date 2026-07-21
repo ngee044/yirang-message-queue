@@ -512,6 +512,7 @@ auto MailboxHandler::stale_cleanup_worker(void) -> void
 	{
 		cleanup_stale_requests();
 		cleanup_stale_responses();
+		cleanup_stale_dead();
 
 		// Use condition variable so stop() can wake us immediately
 		std::unique_lock<std::mutex> lock(pending_mutex_);
@@ -575,17 +576,15 @@ auto MailboxHandler::atomic_write(const std::string& target_path, const std::str
 {
 	auto temp_path = target_path + ".tmp";
 
-	std::ofstream file(temp_path, std::ios::out | std::ios::trunc);
-	if (!file.is_open())
+	// Durable, fail-closed write: abort before rename if the temp cannot be fully written
+	// (e.g. ENOSPC), so a truncated response never replaces a valid one. (Defect D-02)
+	auto [write_ok, write_error] = Utilities::write_file_durable(temp_path, content);
+	if (!write_ok)
 	{
-		return { false, std::format("cannot create temp file: {}", temp_path) };
+		std::error_code ec;
+		std::filesystem::remove(temp_path, ec);
+		return { false, write_error };
 	}
-
-	file << content;
-	file.flush();
-	file.close();
-
-	Utilities::fsync_file(temp_path);
 
 	std::error_code ec;
 	std::filesystem::rename(temp_path, target_path, ec);
@@ -1224,6 +1223,39 @@ auto MailboxHandler::cleanup_stale_responses(void) -> void
 	}
 }
 
+auto MailboxHandler::cleanup_stale_dead(void) -> void
+{
+	// dead/ holds rejected/expired requests (and their .reason sidecars) kept for field
+	// diagnosis. Without GC they accumulate forever and exhaust small embedded flash, so
+	// remove entries older than the configured retention. (Defect D-14)
+	auto dead_dir = build_path(config_.dead_dir);
+
+	std::error_code ec;
+	for (const auto& entry : std::filesystem::directory_iterator(dead_dir, ec))
+	{
+		if (!entry.is_regular_file())
+		{
+			continue;
+		}
+
+		std::error_code file_ec;
+		auto last_write = std::filesystem::last_write_time(entry.path(), file_ec);
+		if (file_ec)
+		{
+			continue;
+		}
+
+		auto file_age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+			std::filesystem::file_time_type::clock::now() - last_write
+		).count();
+
+		if (file_age_ms > config_.dead_retention_ms)
+		{
+			std::filesystem::remove(entry.path(), file_ec);
+		}
+	}
+}
+
 auto MailboxHandler::current_time_ms(void) -> int64_t
 {
 	return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1540,6 +1572,16 @@ auto MailboxHandler::handle_batch_publish(const MailboxRequest& request) -> Mail
 		}
 
 		auto [success_count, error] = backend_->batch_enqueue(envelopes);
+
+		// Messages dropped by validation reduce envelopes.size() up front and are reported as
+		// skipped; a shortfall below that count means the backend failed to persist some — do
+		// not report the batch as fully successful in that case. (Defect D-21)
+		if (success_count < static_cast<int32_t>(envelopes.size()))
+		{
+			return build_error_response(request.request_id, MailboxErrorCode::INTERNAL_ERROR,
+				std::format("batch enqueue persisted {} of {} messages: {}",
+					success_count, envelopes.size(), error.value_or("backend error")));
+		}
 
 		json result;
 		result["published"] = success_count;

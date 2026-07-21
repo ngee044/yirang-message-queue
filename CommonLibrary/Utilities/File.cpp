@@ -6,6 +6,8 @@
 
 #include <format>
 
+#include <cerrno>
+#include <cstring>
 #include <numeric>
 #include <filesystem>
 
@@ -16,22 +18,24 @@
 
 namespace Utilities
 {
-	auto fsync_file(const std::string& path) -> void
+	auto fsync_file(const std::string& path) -> bool
 	{
 #if defined(__unix__) || defined(__APPLE__)
 		int fd = ::open(path.c_str(), O_RDONLY);
 		if (fd < 0)
 		{
-			return;
+			return false;
 		}
-		::fsync(fd);
+		bool ok = (::fsync(fd) == 0);
 		::close(fd);
+		return ok;
 #else
 		(void)path;
+		return true;
 #endif
 	}
 
-	auto fsync_parent_directory(const std::string& path) -> void
+	auto fsync_parent_directory(const std::string& path) -> bool
 	{
 #if defined(__unix__) || defined(__APPLE__)
 		auto parent = std::filesystem::path(path).parent_path();
@@ -42,12 +46,77 @@ namespace Utilities
 		int fd = ::open(parent.c_str(), O_RDONLY);
 		if (fd < 0)
 		{
-			return;
+			return false;
 		}
-		::fsync(fd);
+		bool ok = (::fsync(fd) == 0);
 		::close(fd);
+		return ok;
 #else
 		(void)path;
+		return true;
+#endif
+	}
+
+	auto write_file_durable(const std::string& path, const std::string& content) -> std::tuple<bool, std::optional<std::string>>
+	{
+#if defined(__unix__) || defined(__APPLE__)
+		int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+		if (fd < 0)
+		{
+			return { false, std::format("open failed for '{}': {}", path, std::strerror(errno)) };
+		}
+
+		const char* data = content.data();
+		size_t remaining = content.size();
+		while (remaining > 0)
+		{
+			ssize_t written = ::write(fd, data, remaining);
+			if (written < 0)
+			{
+				if (errno == EINTR)
+				{
+					continue;
+				}
+				int saved = errno;
+				::close(fd);
+				return { false, std::format("write failed for '{}': {}", path, std::strerror(saved)) };
+			}
+			data += written;
+			remaining -= static_cast<size_t>(written);
+		}
+
+		// fsync before close: on delayed-allocation filesystems ENOSPC/EIO only surface here.
+		if (::fsync(fd) != 0)
+		{
+			int saved = errno;
+			::close(fd);
+			return { false, std::format("fsync failed for '{}': {}", path, std::strerror(saved)) };
+		}
+
+		if (::close(fd) != 0)
+		{
+			return { false, std::format("close failed for '{}': {}", path, std::strerror(errno)) };
+		}
+
+		return { true, std::nullopt };
+#else
+		std::ofstream file(path, std::ios::out | std::ios::trunc | std::ios::binary);
+		if (!file.is_open())
+		{
+			return { false, std::format("cannot create file: {}", path) };
+		}
+		file << content;
+		file.flush();
+		if (!file)
+		{
+			return { false, std::format("write failed for '{}'", path) };
+		}
+		file.close();
+		if (file.fail())
+		{
+			return { false, std::format("close failed for '{}'", path) };
+		}
+		return { true, std::nullopt };
 #endif
 	}
 

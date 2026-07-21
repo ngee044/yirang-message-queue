@@ -87,6 +87,7 @@ private:
 	// Stale request handling
 	auto cleanup_stale_requests(void) -> void;
 	auto cleanup_stale_responses(void) -> void;
+	auto cleanup_stale_dead(void) -> void;
 
 	// Utilities
 	auto current_time_ms(void) -> int64_t;

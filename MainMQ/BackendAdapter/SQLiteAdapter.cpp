@@ -437,7 +437,7 @@ auto SQLiteAdapter::ack(const LeaseToken& lease) -> std::tuple<bool, std::option
 		return { false, "failed to delete from msg_index" };
 	}
 
-	if (affected_rows(db_) == 0)
+	if (affected_rows(db_) <= 0)
 	{
 		db_.rollback();
 		return { false, "ack rejected: message is not inflight (lease expired or already settled)" };
@@ -518,7 +518,7 @@ auto SQLiteAdapter::nack(const LeaseToken& lease, const std::string& reason, con
 			return { false, "failed to requeue message" };
 		}
 
-		if (affected_rows(db_) == 0)
+		if (affected_rows(db_) <= 0)
 		{
 			db_.rollback();
 			return { false, "nack rejected: message is not inflight (lease expired or already settled)" };
@@ -540,9 +540,9 @@ auto SQLiteAdapter::nack(const LeaseToken& lease, const std::string& reason, con
 			return { false, tx_error };
 		}
 
-		// Update state to dlq
+		// Update state to dlq, recording reason and timestamp so list-dlq can show them. (D-13)
 		std::string idx_sql = std::format(
-			"UPDATE {} SET state = 'dlq', lease_until = NULL WHERE message_key = ? AND state = 'inflight' AND (? = '' OR lease_id = ?);",
+			"UPDATE {} SET state = 'dlq', lease_until = NULL, dlq_reason = ?, dlq_at = ? WHERE message_key = ? AND state = 'inflight' AND (? = '' OR lease_id = ?);",
 			sqlite_config_.message_index_table
 		);
 
@@ -553,9 +553,11 @@ auto SQLiteAdapter::nack(const LeaseToken& lease, const std::string& reason, con
 			return { false, idx_error };
 		}
 
-		idx_stmt->bind_text(1, lease.message_key);
-		idx_stmt->bind_text(2, lease.lease_id);
-		idx_stmt->bind_text(3, lease.lease_id);
+		idx_stmt->bind_text(1, reason);
+		idx_stmt->bind_int64(2, current_time_ms());
+		idx_stmt->bind_text(3, lease.message_key);
+		idx_stmt->bind_text(4, lease.lease_id);
+		idx_stmt->bind_text(5, lease.lease_id);
 
 		if (idx_stmt->step() != SQLITE_DONE)
 		{
@@ -563,7 +565,7 @@ auto SQLiteAdapter::nack(const LeaseToken& lease, const std::string& reason, con
 			return { false, "failed to move message to dlq" };
 		}
 
-		if (affected_rows(db_) == 0)
+		if (affected_rows(db_) <= 0)
 		{
 			db_.rollback();
 			return { false, "nack rejected: message is not inflight (lease expired or already settled)" };
@@ -667,7 +669,7 @@ auto SQLiteAdapter::extend_lease(const LeaseToken& lease, const int32_t& visibil
 		return { false, "failed to extend lease" };
 	}
 
-	if (affected_rows(db_) == 0)
+	if (affected_rows(db_) <= 0)
 	{
 		db_.rollback();
 		return { false, "extend_lease rejected: lease not held or already expired" };

@@ -633,7 +633,7 @@ auto HybridAdapter::nack(const LeaseToken& lease, const std::string& reason, con
 	else
 	{
 		std::string update_sql = std::format(
-			"UPDATE {} SET state = 'dlq', lease_until = NULL WHERE message_key = ?",
+			"UPDATE {} SET state = 'dlq', lease_until = NULL, dlq_reason = ?, dlq_at = ? WHERE message_key = ?",
 			sqlite_config_.message_index_table
 		);
 
@@ -643,7 +643,9 @@ auto HybridAdapter::nack(const LeaseToken& lease, const std::string& reason, con
 			db_.rollback();
 			return { false, update_prep_error };
 		}
-		update_stmt->bind_text(1, lease.message_key);
+		update_stmt->bind_text(1, reason);
+		update_stmt->bind_int64(2, current_time_ms());
+		update_stmt->bind_text(3, lease.message_key);
 
 		if (update_stmt->step() != SQLITE_DONE)
 		{
@@ -1124,7 +1126,7 @@ auto HybridAdapter::move_to_dlq(const std::string& message_key, const std::strin
 	}
 
 	std::string update_idx_sql = std::format(
-		"UPDATE {} SET state = 'dlq', lease_until = NULL WHERE message_key = ?",
+		"UPDATE {} SET state = 'dlq', lease_until = NULL, dlq_reason = ?, dlq_at = ? WHERE message_key = ?",
 		sqlite_config_.message_index_table
 	);
 
@@ -1134,7 +1136,9 @@ auto HybridAdapter::move_to_dlq(const std::string& message_key, const std::strin
 		db_.rollback();
 		return { false, idx_prep_error };
 	}
-	idx_stmt->bind_text(1, message_key);
+	idx_stmt->bind_text(1, reason);
+	idx_stmt->bind_int64(2, current_time_ms());
+	idx_stmt->bind_text(3, message_key);
 
 	if (idx_stmt->step() != SQLITE_DONE)
 	{
@@ -1240,17 +1244,15 @@ auto HybridAdapter::atomic_write(const std::string& target_path, const std::stri
 {
 	auto temp_path = target_path + ".tmp";
 
-	std::ofstream file(temp_path, std::ios::out | std::ios::trunc);
-	if (!file.is_open())
+	// Durable, fail-closed write: abort before rename if the payload temp cannot be fully
+	// written (e.g. ENOSPC), so a partial payload never replaces a valid one. (Defect D-02)
+	auto [write_ok, write_error] = Utilities::write_file_durable(temp_path, content);
+	if (!write_ok)
 	{
-		return { false, std::format("cannot create temp file: {}", temp_path) };
+		std::error_code ec;
+		std::filesystem::remove(temp_path, ec);
+		return { false, write_error };
 	}
-
-	file << content;
-	file.flush();
-	file.close();
-
-	Utilities::fsync_file(temp_path);
 
 	std::error_code ec;
 	std::filesystem::rename(temp_path, target_path, ec);

@@ -319,6 +319,10 @@ namespace
 					{
 						mailbox_config_.poll_interval_ms = ipc["pollIntervalMs"].get<int32_t>();
 					}
+					if (ipc.contains("deadRetentionMs") && ipc["deadRetentionMs"].is_number())
+					{
+						mailbox_config_.dead_retention_ms = ipc["deadRetentionMs"].get<int32_t>();
+					}
 					if (ipc.contains("useFolderWatcher") && ipc["useFolderWatcher"].is_boolean())
 					{
 						mailbox_config_.use_folder_watcher = ipc["useFolderWatcher"].get<bool>();
@@ -495,6 +499,7 @@ namespace
 		{
 			QueuePolicy policy;
 			policy.visibility_timeout_sec = policy_defaults_.visibility_timeout_sec;
+			policy.ttl_sec = policy_defaults_.ttl_sec;
 
 			const json& obj = *static_cast<const json*>(json_obj);
 
@@ -661,6 +666,13 @@ namespace
 					if (rule_opt.has_value())
 					{
 						schema.rules.push_back(rule_opt.value());
+					}
+					else
+					{
+						// Don't silently drop a misconfigured rule — the operator must know a
+						// validation they configured is not active. (D-20)
+						Logger::handle().write(LogTypes::Error,
+							std::format("Dropped invalid validation rule in schema '{}' (check field/type/value keys)", schema.name));
 					}
 				}
 			}

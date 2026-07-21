@@ -26,21 +26,20 @@ auto atomic_write(const std::string& target_path, const std::string& content) ->
 {
 	auto temp_path = target_path + ".tmp";
 
-	std::ofstream file(temp_path, std::ios::out | std::ios::trunc);
-	if (!file.is_open())
+	// Durable, fail-closed write: on any failure (e.g. ENOSPC) abort before rename so a
+	// partial temp is never promoted over a valid target. (Defect D-02, sibling of the
+	// FileSystemAdapter fix.)
+	auto [write_ok, write_error] = Utilities::write_file_durable(temp_path, content);
+	if (!write_ok)
 	{
+		std::error_code rm_ec;
+		std::filesystem::remove(temp_path, rm_ec);
 		Utilities::Logger::handle().write(
 			Utilities::LogTypes::Error,
-			std::format("Cannot create temp file: {}", temp_path)
+			std::format("Durable write failed: {}", write_error.value_or("unknown"))
 		);
 		return false;
 	}
-
-	file << content;
-	file.flush();
-	file.close();
-
-	Utilities::fsync_file(temp_path);
 
 	std::error_code ec;
 	std::filesystem::rename(temp_path, target_path, ec);
@@ -130,6 +129,11 @@ auto send_request(
 
 		std::this_thread::sleep_for(std::chrono::milliseconds(50));
 	}
+
+	// Timed out. Remove our own request file so it does not accumulate in requests/ when the
+	// daemon is down or unresponsive — the client-side is the only party that can clean it up
+	// in that case. If the daemon already moved it to processing, this is a harmless no-op. (D-15)
+	std::filesystem::remove(request_file, ec);
 
 	return { false, { { "error", "timeout waiting for response" } } };
 }

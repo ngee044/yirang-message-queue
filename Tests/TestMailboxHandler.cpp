@@ -1346,6 +1346,34 @@ TEST_F(MailboxHandlerTest, BatchPublishMultipleMessages)
 	EXPECT_EQ(data["total"].get<int32_t>(), 3);
 }
 
+// TC-MBX-15 (Defect D-21): a batch publish whose backend enqueues all fail must be
+// reported as an error, not ok=true with published=0.
+TEST_F(MailboxHandlerTest, BatchPublishReportsBackendFailure)
+{
+	auto [ok, err] = handler_->start();
+	ASSERT_TRUE(ok);
+
+	mock_backend_->enqueue_should_succeed = false;
+
+	json req;
+	req["requestId"] = "batch-pub-fail";
+	req["clientId"] = "test-client";
+	req["command"] = "batchPublish";
+	req["payload"] = {
+		{ "queue", "test-queue" },
+		{ "messages", json::array({
+			{ { "message", { { "data", 1 } } } },
+			{ { "message", { { "data", 2 } } } }
+		})}
+	};
+
+	write_request(req);
+	auto response = wait_for_response("test-client", "batch-pub-fail");
+	ASSERT_TRUE(response.has_value());
+	EXPECT_FALSE((*response)["ok"].get<bool>())
+		<< "a batch where every backend enqueue failed must not report success";
+}
+
 // ============================================================
 // Batch Consume (FR-CON-06)
 // ============================================================

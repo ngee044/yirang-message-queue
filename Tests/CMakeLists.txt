@@ -18,6 +18,7 @@ set(TEST_SOURCES
 	TestBackendContract.cpp
 	TestFile.cpp
 	TestLogger.cpp
+	TestConverter.cpp
 )
 
 foreach(TEST_SOURCE IN LISTS TEST_SOURCES)

@@ -233,6 +233,25 @@ TEST_F(SQLiteAdapterTest, NackWithoutRequeueMovesToDlq)
 	}
 }
 
+// TC-SQL-26 (Defect D-13): nack-to-DLQ must record the reason so list-dlq surfaces it.
+TEST_F(SQLiteAdapterTest, NackToDlqRecordsReason)
+{
+	auto env = make_envelope("dlq-reason-q", R"({"data":"x"})");
+	adapter_->enqueue(env);
+
+	auto result = adapter_->lease_next("dlq-reason-q", "consumer-1", 30);
+	ASSERT_TRUE(result.leased);
+	ASSERT_TRUE(result.lease.has_value());
+
+	auto [nok, nerr] = adapter_->nack(*result.lease, "fatal boom", false);
+	ASSERT_TRUE(nok) << "nack to dlq failed: " << nerr.value_or("unknown");
+
+	auto [dlq, derr] = adapter_->list_dlq_messages("dlq-reason-q", 10);
+	ASSERT_EQ(dlq.size(), 1u);
+	EXPECT_EQ(dlq[0].reason, "fatal boom") << "DLQ entry must record the nack reason";
+	EXPECT_GT(dlq[0].dlq_at_ms, 0) << "DLQ entry must record dlq_at timestamp";
+}
+
 // ---------------------------------------------------------------------------
 // Direct addressing tests
 // ---------------------------------------------------------------------------

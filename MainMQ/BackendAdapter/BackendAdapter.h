@@ -196,6 +196,7 @@ public:
 		-> std::tuple<int32_t, std::optional<std::string>>
 	{
 		int32_t success_count = 0;
+		std::optional<std::string> first_error;
 		for (const auto& msg : messages)
 		{
 			auto [ok, error] = enqueue(msg);
@@ -203,8 +204,14 @@ public:
 			{
 				success_count++;
 			}
+			else if (!first_error.has_value())
+			{
+				// Surface the first backend failure instead of silently swallowing it, so
+				// callers can distinguish a failed batch from a fully-published one. (D-21)
+				first_error = error.value_or("enqueue failed");
+			}
 		}
-		return { success_count, std::nullopt };
+		return { success_count, first_error };
 	}
 
 	virtual auto batch_lease_next(const std::string& queue, const std::string& consumer_id,

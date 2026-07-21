@@ -116,7 +116,7 @@ case "${1:-help}" in
         docker compose ps
         echo ""
         log_info "Health check:"
-        docker compose exec yirangmq /app/yirangmq-cli-publisher health 2>/dev/null || log_warn "Service not running"
+        docker compose exec -T yirangmq /app/yirangmq-cli-publisher health 2>/dev/null || log_warn "Service not running"
         ;;
 
     cli)
@@ -127,23 +127,28 @@ case "${1:-help}" in
     # Publisher commands
     publish)
         QUEUE="${2:-telemetry}"
-        MESSAGE="${3:-{\"test\":true}}"
+        # Set the default separately: a JSON default inside ${3:-...} would let the inner '}'
+        # terminate the parameter expansion early and append a stray '}' to the message.
+        MESSAGE="${3-}"
+        if [ -z "$MESSAGE" ]; then
+            MESSAGE='{"test":true}'
+        fi
         shift 3 2>/dev/null || true
         log_info "Publishing to queue: $QUEUE"
-        docker compose exec yirangmq /app/yirangmq-cli-publisher --queue "$QUEUE" --message "$MESSAGE" "$@"
+        docker compose exec -T yirangmq /app/yirangmq-cli-publisher --queue "$QUEUE" --message "$MESSAGE" "$@"
         ;;
 
     health)
-        docker compose exec yirangmq /app/yirangmq-cli-publisher health
+        docker compose exec -T yirangmq /app/yirangmq-cli-publisher health
         ;;
 
     metrics)
-        docker compose exec yirangmq /app/yirangmq-cli-publisher metrics
+        docker compose exec -T yirangmq /app/yirangmq-cli-publisher metrics
         ;;
 
     queue-status)
         QUEUE="${2:-telemetry}"
-        docker compose exec yirangmq /app/yirangmq-cli-publisher status --queue "$QUEUE"
+        docker compose exec -T yirangmq /app/yirangmq-cli-publisher status --queue "$QUEUE"
         ;;
 
     # Consumer commands
@@ -151,7 +156,7 @@ case "${1:-help}" in
         QUEUE="${2:-telemetry}"
         CONSUMER_ID="${3:-docker-consumer}"
         log_info "Consuming from queue: $QUEUE"
-        docker compose exec yirangmq /app/yirangmq-cli-consumer consume --queue "$QUEUE" --consumer-id "$CONSUMER_ID"
+        docker compose exec -T yirangmq /app/yirangmq-cli-consumer consume --queue "$QUEUE" --consumer-id "$CONSUMER_ID"
         ;;
 
     ack)
@@ -161,7 +166,7 @@ case "${1:-help}" in
             exit 1
         fi
         log_info "Acknowledging message: $MESSAGE_KEY"
-        docker compose exec yirangmq /app/yirangmq-cli-consumer ack --message-key "$MESSAGE_KEY"
+        docker compose exec -T yirangmq /app/yirangmq-cli-consumer ack --message-key "$MESSAGE_KEY"
         ;;
 
     nack)
@@ -172,7 +177,7 @@ case "${1:-help}" in
         fi
         shift 2
         log_info "Nacking message: $MESSAGE_KEY"
-        docker compose exec yirangmq /app/yirangmq-cli-consumer nack --message-key "$MESSAGE_KEY" "$@"
+        docker compose exec -T yirangmq /app/yirangmq-cli-consumer nack --message-key "$MESSAGE_KEY" "$@"
         ;;
 
     extend-lease)
@@ -183,13 +188,13 @@ case "${1:-help}" in
         fi
         shift 2
         log_info "Extending lease for message: $MESSAGE_KEY"
-        docker compose exec yirangmq /app/yirangmq-cli-consumer extend-lease --message-key "$MESSAGE_KEY" "$@"
+        docker compose exec -T yirangmq /app/yirangmq-cli-consumer extend-lease --message-key "$MESSAGE_KEY" "$@"
         ;;
 
     list-dlq)
         QUEUE="${2:-telemetry}"
         log_info "Listing DLQ for queue: $QUEUE"
-        docker compose exec yirangmq /app/yirangmq-cli-consumer list-dlq --queue "$QUEUE"
+        docker compose exec -T yirangmq /app/yirangmq-cli-consumer list-dlq --queue "$QUEUE"
         ;;
 
     reprocess)
@@ -199,7 +204,7 @@ case "${1:-help}" in
             exit 1
         fi
         log_info "Reprocessing DLQ message: $MESSAGE_KEY"
-        docker compose exec yirangmq /app/yirangmq-cli-consumer reprocess --message-key "$MESSAGE_KEY"
+        docker compose exec -T yirangmq /app/yirangmq-cli-consumer reprocess --message-key "$MESSAGE_KEY"
         ;;
 
     # Test commands

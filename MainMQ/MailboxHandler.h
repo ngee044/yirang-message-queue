@@ -51,6 +51,7 @@ private:
 	auto request_processing_worker(void) -> void;
 	auto stale_cleanup_worker(void) -> void;
 	auto process_pending_requests(void) -> void;
+	auto scan_and_enqueue_requests(const std::string& request_dir) -> void;
 
 	// File operations (atomic write)
 	auto read_request_file(const std::string& file_path) -> std::tuple<std::optional<MailboxRequest>, std::optional<std::string>>;

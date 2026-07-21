@@ -1397,3 +1397,39 @@ TEST_F(MailboxHandlerTest, RejectsPathTraversalInClientId)
 	std::error_code ec;
 	EXPECT_FALSE(fs::exists(config_.root + "/escape", ec)) << "response escaped the responses directory";
 }
+
+// ============================================================
+// TC-MBX-EVT-01: Event mode must detect requests published after
+// startup via atomic rename (.tmp -> .json). efsw reports that
+// rename as Moved (not Add), and the event loop previously scanned
+// the requests directory only once at startup, so in the default
+// (useFolderWatcher = true) configuration every subsequent request
+// was silently ignored. (Defect D-01)
+// ============================================================
+class MailboxHandlerEventModeTest : public MailboxHandlerTest
+{
+protected:
+	void SetUp(void) override
+	{
+		MailboxHandlerTest::SetUp();
+
+		// Rebuild the handler in event-driven mode — the production default.
+		handler_.reset();
+		config_.use_folder_watcher = true;
+		handler_ = std::make_unique<MailboxHandler>(mock_backend_, queue_manager_, config_);
+	}
+};
+
+TEST_F(MailboxHandlerEventModeTest, DetectsAtomicRenamedRequestAfterStartup)
+{
+	auto [ok, err] = handler_->start();
+	ASSERT_TRUE(ok) << "start failed: " << err.value_or("unknown");
+
+	// Published after start() using the same .tmp -> rename pattern the real client uses.
+	auto req = make_request_json("req-evt-1", "client-evt", "health");
+	write_request(req);
+
+	auto response = wait_for_response("client-evt", "req-evt-1", 5000);
+	ASSERT_TRUE(response.has_value()) << "event-mode request via rename was never processed";
+	EXPECT_TRUE((*response)["ok"].get<bool>());
+}

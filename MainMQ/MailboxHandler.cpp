@@ -233,8 +233,11 @@ auto MailboxHandler::build_response_path(const std::string& client_id, const std
 
 auto MailboxHandler::on_file_changed(const std::string& dir, const std::string& filename, efsw::Action action, const std::string& old_filename) -> void
 {
-	// Only process new JSON files
-	if (action != efsw::Action::Add)
+	// A standard client publishes a request by writing "<id>.json.tmp" and renaming it
+	// to "<id>.json" in this same directory. efsw's inotify backend reports that rename
+	// as Moved (not Add), so filtering on Add alone drops every real request. Treat any
+	// non-delete change as a candidate; the event loop rescan is the authoritative net.
+	if (action == efsw::Action::Delete)
 	{
 		return;
 	}
@@ -376,34 +379,49 @@ auto MailboxHandler::process_pending_requests(void) -> void
 	}
 }
 
+auto MailboxHandler::scan_and_enqueue_requests(const std::string& request_dir) -> void
+{
+	auto files = list_files(request_dir);
+	if (files.empty())
+	{
+		return;
+	}
+
+	std::lock_guard<std::mutex> lock(pending_mutex_);
+	for (const auto& file_path : files)
+	{
+		pending_requests_.push(file_path);
+	}
+}
+
 auto MailboxHandler::request_processing_worker(void) -> void
 {
 	// Process any existing files on startup
 	auto request_dir = build_path(config_.requests_dir);
-	auto existing_files = list_files(request_dir);
-	for (const auto& file_path : existing_files)
-	{
-		std::lock_guard<std::mutex> lock(pending_mutex_);
-		pending_requests_.push(file_path);
-	}
+	scan_and_enqueue_requests(request_dir);
 
 	while (running_.load())
 	{
 		if (use_folder_watcher_)
 		{
-			// Event-driven mode: wait for notification or timeout
-			std::unique_lock<std::mutex> lock(pending_mutex_);
-			pending_cv_.wait_for(lock, std::chrono::milliseconds(config_.poll_interval_ms), [this]()
+			// Event-driven mode: a FolderWatcher notification (or the timeout) wakes us.
 			{
-				return !pending_requests_.empty() || !running_.load();
-			});
-			lock.unlock();
+				std::unique_lock<std::mutex> lock(pending_mutex_);
+				pending_cv_.wait_for(lock, std::chrono::milliseconds(config_.poll_interval_ms), [this]()
+				{
+					return !pending_requests_.empty() || !running_.load();
+				});
+			}
 
 			if (!running_.load())
 			{
 				break;
 			}
 
+			// Rescan the directory on every wake: efsw reports the client's atomic rename
+			// as Moved (not Add) and can drop events entirely, so the scan — not the event
+			// stream — is the source of truth. The event only wakes us sooner. (D-01)
+			scan_and_enqueue_requests(request_dir);
 			process_pending_requests();
 		}
 		else

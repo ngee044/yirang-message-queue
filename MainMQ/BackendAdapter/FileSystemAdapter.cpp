@@ -1465,3 +1465,60 @@ auto FileSystemAdapter::purge_expired_messages(void) -> std::tuple<int32_t, std:
 
 	return { purged, std::nullopt };
 }
+
+auto FileSystemAdapter::purge_dlq_messages(const std::string& queue, int64_t older_than_ms) -> std::tuple<int32_t, std::optional<std::string>>
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+
+	if (!is_open_)
+	{
+		return { 0, "adapter not open" };
+	}
+
+	auto dlq_dir = build_queue_path(queue, fs_config_.dlq_dir);
+
+	std::error_code ec;
+	if (!std::filesystem::exists(dlq_dir, ec))
+	{
+		return { 0, std::nullopt };
+	}
+
+	int32_t purged = 0;
+	for (const auto& entry : std::filesystem::directory_iterator(dlq_dir, ec))
+	{
+		if (!entry.is_regular_file() || entry.path().extension() != ".json")
+		{
+			continue;
+		}
+
+		auto [content, read_error] = read_file(entry.path().string());
+		if (!content.has_value())
+		{
+			continue;
+		}
+
+		int64_t dlq_at = 0;
+		try
+		{
+			json envelope = json::parse(content.value());
+			dlq_at = envelope.value("dlqAt", static_cast<int64_t>(0));
+		}
+		catch (...)
+		{
+			continue;
+		}
+
+		// dlq_at at or before the cutoff means the entry is past its retention window. (D-07)
+		if (dlq_at > 0 && dlq_at <= older_than_ms)
+		{
+			std::error_code rm_ec;
+			std::filesystem::remove(entry.path(), rm_ec);
+			if (!rm_ec)
+			{
+				purged++;
+			}
+		}
+	}
+
+	return { purged, std::nullopt };
+}

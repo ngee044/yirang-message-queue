@@ -16,6 +16,11 @@ BUILD_TESTS=true
 RUN_TESTS=false
 JOBS=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
 
+# Cross-compilation / embedded deployment (F-14). Empty = native host build.
+TRIPLET=""            # vcpkg target triplet, e.g. arm64-linux, arm-linux
+CROSS_TOOLCHAIN=""    # CMake cross toolchain file (chainloaded through vcpkg)
+STATIC_LINK=false     # statically link the runtime (glibc/musl independence)
+
 # vcpkg paths to search
 VCPKG_PATHS=(
     "$VCPKG_ROOT"
@@ -46,7 +51,13 @@ print_usage() {
     echo "  -v, --vcpkg PATH  Specify vcpkg root directory path"
     echo "  -t, --no-tests    Disable building tests"
     echo "      --test        Run tests after build"
+    echo "  -m, --minsize     Build in MinSizeRel mode (smallest binary, for embedded)"
     echo "  -h, --help        Show this help message and exit"
+    echo ""
+    echo "CROSS-COMPILATION (embedded targets):"
+    echo "      --triplet T   vcpkg target triplet (e.g. arm64-linux, arm-linux)"
+    echo "      --toolchain F CMake cross toolchain file (chainloaded through vcpkg)"
+    echo "      --static      Statically link the runtime (glibc/musl independence)"
     echo ""
     echo "EXAMPLES:"
     echo "  $0                    # Release build with auto-detected vcpkg"
@@ -54,6 +65,8 @@ print_usage() {
     echo "  $0 -c -d              # Clean debug build"
     echo "  $0 -c -r -j 8         # Clean release build with 8 parallel jobs"
     echo "  $0 -v ~/vcpkg         # Build with custom vcpkg path"
+    echo "  $0 -m --static --triplet arm64-linux --toolchain cmake/arm64.cmake"
+    echo "                        # Cross-compile a small static binary for arm64"
     echo ""
     echo "VCPKG AUTO-DETECTION PATHS:"
     echo "  1. \$VCPKG_ROOT environment variable"
@@ -126,6 +139,22 @@ while [[ $# -gt 0 ]]; do
             RUN_TESTS=true
             shift
             ;;
+        --triplet)
+            TRIPLET="$2"
+            shift 2
+            ;;
+        --toolchain)
+            CROSS_TOOLCHAIN="$2"
+            shift 2
+            ;;
+        --static)
+            STATIC_LINK=true
+            shift
+            ;;
+        -m|--minsize)
+            BUILD_TYPE="MinSizeRel"
+            shift
+            ;;
         -v|--vcpkg)
             VCPKG_ROOT="$2"
             shift 2
@@ -179,6 +208,27 @@ CMAKE_ARGS=(
 
 if [[ "$BUILD_TESTS" == false ]]; then
     CMAKE_ARGS+=(-DBUILD_TESTS=OFF)
+fi
+
+# Cross-compilation for embedded targets (F-14). The vcpkg toolchain stays primary and
+# chainloads the cross toolchain, so dependencies are built for the target triplet.
+if [[ -n "$TRIPLET" ]]; then
+    log_info "Cross target triplet: $TRIPLET"
+    CMAKE_ARGS+=(-DVCPKG_TARGET_TRIPLET="$TRIPLET")
+fi
+
+if [[ -n "$CROSS_TOOLCHAIN" ]]; then
+    if [[ ! -f "$CROSS_TOOLCHAIN" ]]; then
+        log_error "Cross toolchain file not found: $CROSS_TOOLCHAIN"
+        exit 1
+    fi
+    log_info "Cross toolchain: $CROSS_TOOLCHAIN"
+    CMAKE_ARGS+=(-DVCPKG_CHAINLOAD_TOOLCHAIN_FILE="$CROSS_TOOLCHAIN")
+fi
+
+if [[ "$STATIC_LINK" == true ]]; then
+    log_info "Static linking enabled"
+    CMAKE_ARGS+=(-DCMAKE_EXE_LINKER_FLAGS="-static")
 fi
 
 cmake "${CMAKE_ARGS[@]}"

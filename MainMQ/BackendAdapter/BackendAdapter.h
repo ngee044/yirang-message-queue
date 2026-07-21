@@ -194,6 +194,17 @@ public:
 	// TTL: purge expired messages (ready/delayed only, not inflight)
 	virtual auto purge_expired_messages(void) -> std::tuple<int32_t, std::optional<std::string>> = 0;
 
+	// DLQ retention: purge DLQ messages whose dlq_at is at or before older_than_ms for a queue.
+	// Non-pure with a no-op default so backends without DLQ-retention support (and test mocks)
+	// remain valid; real backends override it. Returns the number purged. (Defect D-07)
+	virtual auto purge_dlq_messages(const std::string& queue, int64_t older_than_ms)
+		-> std::tuple<int32_t, std::optional<std::string>>
+	{
+		(void)queue;
+		(void)older_than_ms;
+		return { 0, std::nullopt };
+	}
+
 	// Batch operations (default: iterate single operations)
 	virtual auto batch_enqueue(const std::vector<MessageEnvelope>& messages)
 		-> std::tuple<int32_t, std::optional<std::string>>

@@ -49,6 +49,9 @@ print_usage() {
     echo "Interactive:"
     echo "  cli       Open CLI shell (interactive)"
     echo ""
+    echo "Cross-build (embedded):"
+    echo "  buildx [platform]  Cross-build runtime image (default linux/arm64; QEMU, slow)"
+    echo ""
     echo "Examples:"
     echo "  $0 up                                    # Start service"
     echo "  $0 logs -f                              # Follow logs"
@@ -91,6 +94,17 @@ case "${1:-help}" in
     build)
         log_info "Building Yi-Rang MQ image..."
         docker compose build --no-cache
+        ;;
+
+    buildx)
+        # Cross-build the deployable runtime image for an embedded target platform. (F-14)
+        # Uses QEMU emulation via buildx, so the vcpkg dependency build is slow — intended for
+        # CI or a one-off image bake, not the local dev loop. Requires: docker buildx + binfmt.
+        PLATFORM="${2:-linux/arm64}"
+        TAG="yirangmq:${PLATFORM//\//-}"
+        log_info "Cross-building runtime image for $PLATFORM (QEMU emulation — this is slow)..."
+        docker buildx build --platform "$PLATFORM" --target runtime -f Dockerfile -t "$TAG" --load ..
+        log_pass_or_fail "buildx $PLATFORM" $?
         ;;
 
     logs)

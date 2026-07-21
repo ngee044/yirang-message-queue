@@ -329,6 +329,45 @@ QueueManager::QueueManager(std::shared_ptr<BackendAdapter> backend, const QueueM
 					);
 				}
 
+				// DLQ retention: purge DLQ entries older than each queue's retention window.
+				// Snapshot the (queue, days) pairs under the policies lock, then call the backend
+				// outside it to avoid holding two locks during I/O. (Defect D-07)
+				std::vector<std::pair<std::string, int32_t>> dlq_retentions;
+				{
+					std::lock_guard<std::mutex> plock(policies_mutex_);
+					for (const auto& [queue_name, policy] : queue_policies_)
+					{
+						if (policy.dlq.enabled && policy.dlq.retention_days > 0)
+						{
+							dlq_retentions.emplace_back(queue_name, policy.dlq.retention_days);
+						}
+					}
+				}
+
+				auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+					std::chrono::system_clock::now().time_since_epoch()
+				).count();
+
+				for (const auto& [queue_name, retention_days] : dlq_retentions)
+				{
+					auto cutoff = now_ms - static_cast<int64_t>(retention_days) * 24 * 60 * 60 * 1000;
+					auto [dlq_purged, dlq_error] = backend_->purge_dlq_messages(queue_name, cutoff);
+					if (dlq_error.has_value())
+					{
+						Utilities::Logger::handle().write(
+							Utilities::LogTypes::Error,
+							std::format("Failed to purge DLQ retention for queue {}: {}", queue_name, dlq_error.value())
+						);
+					}
+					else if (dlq_purged > 0)
+					{
+						Utilities::Logger::handle().write(
+							Utilities::LogTypes::Information,
+							std::format("Purged {} DLQ messages past retention ({} days) for queue {}", dlq_purged, retention_days, queue_name)
+						);
+					}
+				}
+
 				std::unique_lock<std::mutex> lock(sweep_mutex_);
 				sweep_cv_.wait_for(lock, std::chrono::milliseconds(config_.ttl_sweep_interval_ms), [this] { return !running_.load(); });
 			}

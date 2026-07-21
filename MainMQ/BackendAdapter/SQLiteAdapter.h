@@ -41,6 +41,7 @@ public:
 	auto reprocess_dlq_message(const std::string& message_key) -> std::tuple<bool, std::optional<std::string>> override;
 
 	auto purge_expired_messages(void) -> std::tuple<int32_t, std::optional<std::string>> override;
+	auto purge_dlq_messages(const std::string& queue, int64_t older_than_ms) -> std::tuple<int32_t, std::optional<std::string>> override;
 
 private:
 	auto apply_pragmas(void) -> std::tuple<bool, std::optional<std::string>>;

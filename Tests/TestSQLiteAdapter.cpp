@@ -290,6 +290,40 @@ TEST_F(SQLiteAdapterTest, NackRequeueBelowLimitReturnsToReady)
 	EXPECT_GE(metrics.ready + metrics.delayed, 1u) << "below the limit, nack must requeue";
 }
 
+// TC-SQL-19 (Defect D-07): DLQ retention purge removes only entries at or older than the
+// cutoff (dlq_at <= older_than_ms), leaving newer ones intact.
+TEST_F(SQLiteAdapterTest, PurgeDlqMessagesRespectsRetentionCutoff)
+{
+	auto env = make_envelope("retain_q", R"({"data":"z"})");
+	adapter_->enqueue(env);
+
+	auto result = adapter_->lease_next("retain_q", "w1", 30);
+	ASSERT_TRUE(result.leased);
+	ASSERT_TRUE(result.lease.has_value());
+
+	auto [nok, nerr] = adapter_->nack(*result.lease, "permanent", false);  // -> DLQ, dlq_at ~ now
+	ASSERT_TRUE(nok) << "nack to dlq failed: " << nerr.value_or("unknown");
+
+	auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+		std::chrono::system_clock::now().time_since_epoch()).count();
+
+	// Cutoff in the past: the fresh entry (dlq_at ~ now) is newer -> retained.
+	auto [purged_none, e1] = adapter_->purge_dlq_messages("retain_q", now - 60000);
+	EXPECT_EQ(purged_none, 0);
+	{
+		auto [m, me] = adapter_->metrics("retain_q");
+		EXPECT_EQ(m.dlq, 1u) << "entry newer than cutoff must be retained";
+	}
+
+	// Cutoff in the future: the entry is now older than the cutoff -> purged.
+	auto [purged_one, e2] = adapter_->purge_dlq_messages("retain_q", now + 60000);
+	EXPECT_EQ(purged_one, 1);
+	{
+		auto [m, me] = adapter_->metrics("retain_q");
+		EXPECT_EQ(m.dlq, 0u) << "entry older than cutoff must be purged";
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Direct addressing tests
 // ---------------------------------------------------------------------------

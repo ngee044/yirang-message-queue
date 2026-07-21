@@ -247,12 +247,12 @@ auto MailboxHandler::on_file_changed(const std::string& dir, const std::string& 
 		return;
 	}
 
-	std::filesystem::path file_path = dir;
-	file_path /= filename;
-
+	// Wake hint only: flag that a rescan is due and let the event loop scan requests/ as the
+	// single source of truth. Enqueuing here too would double-add every request (the loop
+	// rescan re-adds the same file), producing spurious "file disappeared" logs. (D-01)
 	{
 		std::lock_guard<std::mutex> lock(pending_mutex_);
-		pending_requests_.push(file_path.string());
+		rescan_requested_ = true;
 	}
 	// notify_all (not notify_one): the request worker and the stale-cleanup worker both wait
 	// on pending_cv_, so notify_one could wake the wrong one and delay the request. (D-31)
@@ -398,33 +398,30 @@ auto MailboxHandler::scan_and_enqueue_requests(const std::string& request_dir) -
 
 auto MailboxHandler::request_processing_worker(void) -> void
 {
-	// Process any existing files on startup
 	auto request_dir = build_path(config_.requests_dir);
-	scan_and_enqueue_requests(request_dir);
 
 	while (running_.load())
 	{
 		if (use_folder_watcher_)
 		{
-			// Event-driven mode: a FolderWatcher notification (or the timeout) wakes us.
-			{
-				std::unique_lock<std::mutex> lock(pending_mutex_);
-				pending_cv_.wait_for(lock, std::chrono::milliseconds(config_.poll_interval_ms), [this]()
-				{
-					return !pending_requests_.empty() || !running_.load();
-				});
-			}
+			// The directory rescan is the single source of truth: efsw reports the client's
+			// atomic rename as Moved (not Add) and can drop events, so we scan requests/ at
+			// startup (first iteration) and on every wake, then process. on_file_changed only
+			// sets rescan_requested_ to wake us sooner — it does not enqueue. (D-01)
+			scan_and_enqueue_requests(request_dir);
+			process_pending_requests();
 
 			if (!running_.load())
 			{
 				break;
 			}
 
-			// Rescan the directory on every wake: efsw reports the client's atomic rename
-			// as Moved (not Add) and can drop events entirely, so the scan — not the event
-			// stream — is the source of truth. The event only wakes us sooner. (D-01)
-			scan_and_enqueue_requests(request_dir);
-			process_pending_requests();
+			std::unique_lock<std::mutex> lock(pending_mutex_);
+			pending_cv_.wait_for(lock, std::chrono::milliseconds(config_.poll_interval_ms), [this]()
+			{
+				return rescan_requested_ || !running_.load();
+			});
+			rescan_requested_ = false;
 		}
 		else
 		{

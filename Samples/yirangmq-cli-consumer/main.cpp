@@ -197,7 +197,13 @@ auto cmd_nack(ArgumentParser& args, Configurations& config) -> int
 	auto message_key = args.to_string("--message-key");
 	auto lease_id = args.to_string("--lease-id");
 	auto reason = args.to_string("--reason");
-	auto requeue = args.to_string("--requeue").has_value();
+	// --requeue is a presence flag (registers as "true"); also honor an explicit value so
+	// "--requeue false" means false instead of being silently treated as true. (Defect D-32)
+	auto requeue_arg = args.to_string("--requeue");
+	auto requeue = requeue_arg.has_value()
+		&& requeue_arg.value() != "false"
+		&& requeue_arg.value() != "0"
+		&& requeue_arg.value() != "no";
 
 	if (!message_key.has_value())
 	{

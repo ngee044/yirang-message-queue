@@ -313,6 +313,7 @@ cd build/out
 | `consume` | 메시지 소비 |
 | `ack` | 메시지 처리 완료 확인 |
 | `nack` | 메시지 처리 실패 알림 |
+| `extend-lease` | Lease 가시성 시간 연장 |
 | `list-dlq` | DLQ 메시지 목록 |
 | `reprocess` | DLQ 메시지 재처리 |
 | `help` | 도움말 표시 |
@@ -603,17 +604,19 @@ cd docker
 ./docker-compose.sh down
 ```
 
-### 로컬 통합 테스트
+### 통합 테스트
+
+로컬 macOS는 efsw vcpkg 빌드가 불가하므로 테스트는 Docker로 실행한다.
 
 ```bash
-# Mailbox IPC 테스트
-./test_mailbox.sh
+cd docker
 
-# 전체 백엔드 모드 테스트
-./test_all_modes.sh
+# 단위 + 통합 전체
+./docker-compose.sh test
 
-# Fault tolerance 테스트
-./test_fault.sh
+# 단위만 / 통합만
+./docker-compose.sh test-unit
+./docker-compose.sh test-integration
 ```
 
 ---

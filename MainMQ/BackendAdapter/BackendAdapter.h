@@ -166,7 +166,10 @@ public:
 	virtual auto lease_next(const std::string& queue, const std::string& consumer_id, const int32_t& visibility_timeout_sec)
 		-> LeaseResult = 0;
 	virtual auto ack(const LeaseToken& lease) -> std::tuple<bool, std::optional<std::string>> = 0;
-	virtual auto nack(const LeaseToken& lease, const std::string& reason, const bool& requeue)
+	// retry_limit >= 0 caps explicit requeue: when the message's attempt has reached it, the
+	// nack is routed to DLQ instead of ready, preventing a poison-message loop. -1 disables
+	// the cap (legacy behavior). (Defect D-06)
+	virtual auto nack(const LeaseToken& lease, const std::string& reason, const bool& requeue, int32_t retry_limit = -1)
 		-> std::tuple<bool, std::optional<std::string>> = 0;
 	virtual auto extend_lease(const LeaseToken& lease, const int32_t& visibility_timeout_sec)
 		-> std::tuple<bool, std::optional<std::string>> = 0;

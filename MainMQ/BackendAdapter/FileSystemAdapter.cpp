@@ -381,7 +381,7 @@ auto FileSystemAdapter::ack(const LeaseToken& lease) -> std::tuple<bool, std::op
 	return { true, std::nullopt };
 }
 
-auto FileSystemAdapter::nack(const LeaseToken& lease, const std::string& reason, const bool& requeue)
+auto FileSystemAdapter::nack(const LeaseToken& lease, const std::string& reason, const bool& requeue, int32_t retry_limit)
 	-> std::tuple<bool, std::optional<std::string>>
 {
 	std::lock_guard<std::mutex> lock(mutex_);
@@ -431,7 +431,15 @@ auto FileSystemAdapter::nack(const LeaseToken& lease, const std::string& reason,
 
 	auto processing_path = build_queue_path(meta.queue, fs_config_.processing_dir, filename);
 
-	if (requeue)
+	// Cap explicit requeue: a message that has reached the retry limit goes to DLQ instead of
+	// back to inbox, preventing an infinite nack-requeue loop on a poison message. (Defect D-06)
+	bool effective_requeue = requeue;
+	if (requeue && retry_limit >= 0 && meta.attempt >= retry_limit)
+	{
+		effective_requeue = false;
+	}
+
+	if (effective_requeue)
 	{
 		// Move back to inbox
 		auto inbox_path = build_queue_path(meta.queue, fs_config_.inbox_dir, filename);

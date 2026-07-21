@@ -101,7 +101,7 @@ public:
 		return { true, std::nullopt };
 	}
 
-	auto nack(const LeaseToken& /*lease*/, const std::string& /*reason*/, const bool& /*requeue*/)
+	auto nack(const LeaseToken& /*lease*/, const std::string& /*reason*/, const bool& /*requeue*/, int32_t /*retry_limit*/ = -1)
 		-> std::tuple<bool, std::optional<std::string>> override
 	{
 		return { true, std::nullopt };

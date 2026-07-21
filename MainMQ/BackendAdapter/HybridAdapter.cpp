@@ -567,7 +567,7 @@ auto HybridAdapter::ack(const LeaseToken& lease) -> std::tuple<bool, std::option
 	return { true, std::nullopt };
 }
 
-auto HybridAdapter::nack(const LeaseToken& lease, const std::string& reason, const bool& requeue)
+auto HybridAdapter::nack(const LeaseToken& lease, const std::string& reason, const bool& requeue, int32_t retry_limit)
 	-> std::tuple<bool, std::optional<std::string>>
 {
 	std::lock_guard<std::mutex> lock(db_mutex_);
@@ -586,7 +586,7 @@ auto HybridAdapter::nack(const LeaseToken& lease, const std::string& reason, con
 	}
 
 	std::string check_sql = std::format(
-		"SELECT queue FROM {} WHERE message_key = ? AND state = 'inflight' AND (? = '' OR lease_id = ?)",
+		"SELECT queue, attempt FROM {} WHERE message_key = ? AND state = 'inflight' AND (? = '' OR lease_id = ?)",
 		sqlite_config_.message_index_table
 	);
 
@@ -607,8 +607,17 @@ auto HybridAdapter::nack(const LeaseToken& lease, const std::string& reason, con
 	}
 
 	std::string queue = check_stmt->column_text(0);
+	int32_t attempt = check_stmt->column_int(1);
 
-	if (requeue)
+	// Cap explicit requeue: a message that has reached the retry limit goes to DLQ instead of
+	// ready, preventing an infinite nack-requeue loop on a poison message. (Defect D-06)
+	bool effective_requeue = requeue;
+	if (requeue && retry_limit >= 0 && attempt >= retry_limit)
+	{
+		effective_requeue = false;
+	}
+
+	if (effective_requeue)
 	{
 		std::string update_sql = std::format(
 			"UPDATE {} SET state = 'ready', lease_until = NULL, available_at = ? WHERE message_key = ?",
@@ -1717,7 +1726,6 @@ auto HybridAdapter::check_consistency(const std::string& queue)
 		}
 
 		// Check for stale archives (older than retention period, e.g., 7 days)
-		auto now = current_time_ms();
 		auto retention_ms = static_cast<int64_t>(7 * 24 * 60 * 60 * 1000); // 7 days
 
 		for (const auto& archive_id : archive_files)
@@ -1728,12 +1736,13 @@ auto HybridAdapter::check_consistency(const std::string& queue)
 			auto last_write = std::filesystem::last_write_time(archive_path, ec);
 			if (!ec)
 			{
-				auto file_time = std::chrono::duration_cast<std::chrono::milliseconds>(
-					last_write.time_since_epoch()
+				// Age must be computed with the file clock's own now(): subtracting a
+				// file_clock timestamp from a system_clock one mixes epochs (they differ on
+				// libstdc++) and previously mis-flagged every archive as stale. (Defect D-08)
+				auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+					std::filesystem::file_time_type::clock::now() - last_write
 				).count();
 
-				// Convert to comparable time (approximate since different clocks)
-				auto age_ms = now - file_time;
 				if (age_ms > retention_ms)
 				{
 					ConsistencyIssue issue;

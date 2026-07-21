@@ -474,7 +474,7 @@ auto SQLiteAdapter::ack(const LeaseToken& lease) -> std::tuple<bool, std::option
 	return { true, std::nullopt };
 }
 
-auto SQLiteAdapter::nack(const LeaseToken& lease, const std::string& reason, const bool& requeue)
+auto SQLiteAdapter::nack(const LeaseToken& lease, const std::string& reason, const bool& requeue, int32_t retry_limit)
 	-> std::tuple<bool, std::optional<std::string>>
 {
 	std::lock_guard<std::mutex> lock(db_mutex_);
@@ -486,7 +486,27 @@ auto SQLiteAdapter::nack(const LeaseToken& lease, const std::string& reason, con
 
 	auto now = current_time_ms();
 
-	if (requeue)
+	// Cap explicit requeue: if the message has already reached the retry limit, route it to
+	// DLQ instead of ready to prevent an infinite nack-requeue loop on a poison message. (D-06)
+	bool effective_requeue = requeue;
+	if (requeue && retry_limit >= 0)
+	{
+		std::string attempt_sql = std::format(
+			"SELECT attempt FROM {} WHERE message_key = ? AND state = 'inflight';",
+			sqlite_config_.message_index_table
+		);
+		auto [attempt_stmt, attempt_error] = db_.prepare(attempt_sql);
+		if (attempt_stmt)
+		{
+			attempt_stmt->bind_text(1, lease.message_key);
+			if (attempt_stmt->step() == SQLITE_ROW && attempt_stmt->column_int(0) >= retry_limit)
+			{
+				effective_requeue = false;
+			}
+		}
+	}
+
+	if (effective_requeue)
 	{
 		auto [tx_ok, tx_error] = db_.begin_transaction();
 		if (!tx_ok)

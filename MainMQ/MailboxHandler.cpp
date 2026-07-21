@@ -254,7 +254,9 @@ auto MailboxHandler::on_file_changed(const std::string& dir, const std::string& 
 		std::lock_guard<std::mutex> lock(pending_mutex_);
 		pending_requests_.push(file_path.string());
 	}
-	pending_cv_.notify_one();
+	// notify_all (not notify_one): the request worker and the stale-cleanup worker both wait
+	// on pending_cv_, so notify_one could wake the wrong one and delay the request. (D-31)
+	pending_cv_.notify_all();
 }
 
 auto MailboxHandler::process_pending_requests(void) -> void
@@ -501,7 +503,13 @@ auto MailboxHandler::request_processing_worker(void) -> void
 				delete_processed(processing_path);
 			}
 
-			std::this_thread::sleep_for(std::chrono::milliseconds(config_.poll_interval_ms));
+			// Interruptible wait (not sleep_for) so stop()'s notify_all wakes the poll loop
+			// immediately instead of blocking up to a full interval. (Defect D-31)
+			std::unique_lock<std::mutex> lock(pending_mutex_);
+			pending_cv_.wait_for(lock, std::chrono::milliseconds(config_.poll_interval_ms), [this]()
+			{
+				return !running_.load();
+			});
 		}
 	}
 }
@@ -1022,7 +1030,25 @@ auto MailboxHandler::handle_nack(const MailboxRequest& request) -> MailboxRespon
 		std::string reason = payload.value("reason", "");
 		bool requeue = payload.value("requeue", false);
 
-		auto [ok, error] = backend_->nack(lease, reason, requeue);
+		// Pass the queue's retry limit so the backend caps requeue at it (poison-loop guard).
+		// message_key is "msg:{queue}:{id}"; -1 (no policy) leaves the legacy uncapped behavior. (D-06)
+		int32_t retry_limit = -1;
+		if (queue_manager_)
+		{
+			auto first = lease.message_key.find(':');
+			auto last = lease.message_key.rfind(':');
+			if (first != std::string::npos && last != std::string::npos && last > first)
+			{
+				auto queue = lease.message_key.substr(first + 1, last - first - 1);
+				auto policy = queue_manager_->get_policy(queue);
+				if (policy.has_value())
+				{
+					retry_limit = policy->retry.limit;
+				}
+			}
+		}
+
+		auto [ok, error] = backend_->nack(lease, reason, requeue, retry_limit);
 		if (!ok)
 		{
 			return build_error_response(request.request_id, MailboxErrorCode::INTERNAL_ERROR, error.value_or("nack failed"));
@@ -1609,7 +1635,9 @@ auto MailboxHandler::handle_batch_consume(const MailboxRequest& request) -> Mail
 			return build_error_response(request.request_id, MailboxErrorCode::INVALID_REQUEST, "queue is required");
 		}
 
-		std::string consumer_id = payload.value("consumerId", "");
+		// Default to the requesting client's id, matching single consume, so the lease owner
+		// is consistent between consume and batch-consume flows. (Defect D-30)
+		std::string consumer_id = payload.value("consumerId", request.client_id);
 		int32_t visibility_timeout = payload.value("visibilityTimeoutSec", 30);
 		int32_t max_messages = payload.value("maxMessages", 10);
 

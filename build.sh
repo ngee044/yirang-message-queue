@@ -202,7 +202,7 @@ fi
 if [[ -d "$BUILD_DIR/out" ]]; then
     echo ""
     log_info "Built executables:"
-    find "$BUILD_DIR/out" -type f -perm +111 2>/dev/null | while read -r exe; do
+    find "$BUILD_DIR/out" -type f -perm -u+x 2>/dev/null | while read -r exe; do
         echo "  - $exe"
     done
 fi

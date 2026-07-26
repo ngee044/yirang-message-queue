@@ -42,9 +42,10 @@ print_usage() {
     echo "  reprocess     Reprocess a DLQ message"
     echo ""
     echo "Test Commands:"
-    echo "  test            Run all tests (unit + integration)"
+    echo "  test            Run all tests (unit + integration + wrapper round-trip)"
     echo "  test-unit       Run unit tests only"
     echo "  test-integration Run integration tests only"
+    echo "  test-wrapper    Run host wrapper publish round-trip only"
     echo ""
     echo "Interactive:"
     echo "  cli       Open CLI shell (interactive)"
@@ -76,6 +77,40 @@ log_pass_or_fail() {
     else
         log_error "$1: FAIL (exit ${2:-1})"
         exit "${2:-1}"
+    fi
+}
+
+# Host-side wrapper round-trip: verifies that `docker-compose.sh publish` passes a JSON
+# payload through docker-exec + shell layers intact. Regression guard for the default-value
+# brace bug (MESSAGE="${3:-{...}}" appended a stray '}') that broke every wrapper publish.
+run_wrapper_publish_test() {
+    log_info "Phase 3: Wrapper publish round-trip..."
+    local marker='wrap-roundtrip-marker'
+    # Payload includes braces/quotes inside a string to stress shell quoting.
+    local payload="{\"deviceId\":\"$marker\",\"timestamp\":1,\"note\":\"a{b}c\"}"
+
+    if ! docker compose up -d --build --wait yirangmq >/dev/null 2>&1; then
+        log_error "Wrapper round-trip: daemon failed to start"
+        exit 1
+    fi
+
+    local pub
+    pub=$("$0" publish telemetry "$payload" 2>&1)
+    if ! echo "$pub" | grep -q 'published successfully'; then
+        log_error "Wrapper round-trip: publish did not succeed — $pub"
+        docker compose down -v >/dev/null 2>&1
+        exit 1
+    fi
+
+    local con
+    con=$("$0" consume telemetry 2>&1)
+    docker compose down -v >/dev/null 2>&1
+
+    if echo "$con" | grep -q "$marker"; then
+        log_info "Wrapper publish round-trip (JSON payload intact): PASS"
+    else
+        log_error "Wrapper round-trip: payload not delivered intact — $con"
+        exit 1
     fi
 }
 
@@ -217,6 +252,11 @@ case "${1:-help}" in
         docker compose build yirangmq-integration-test 2>&1
         log_pass_or_fail "Integration build" $?
         docker compose run --rm yirangmq-integration-test
+        run_wrapper_publish_test
+        ;;
+
+    test-wrapper)
+        run_wrapper_publish_test
         ;;
 
     test-unit)

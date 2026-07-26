@@ -42,12 +42,16 @@ print_usage() {
     echo "  reprocess     Reprocess a DLQ message"
     echo ""
     echo "Test Commands:"
-    echo "  test            Run all tests (unit + integration)"
+    echo "  test            Run all tests (unit + integration + wrapper round-trip)"
     echo "  test-unit       Run unit tests only"
     echo "  test-integration Run integration tests only"
+    echo "  test-wrapper    Run host wrapper publish round-trip only"
     echo ""
     echo "Interactive:"
     echo "  cli       Open CLI shell (interactive)"
+    echo ""
+    echo "Cross-build (embedded):"
+    echo "  buildx [platform]  Cross-build runtime image (default linux/arm64; QEMU, slow)"
     echo ""
     echo "Examples:"
     echo "  $0 up                                    # Start service"
@@ -76,6 +80,40 @@ log_pass_or_fail() {
     fi
 }
 
+# Host-side wrapper round-trip: verifies that `docker-compose.sh publish` passes a JSON
+# payload through docker-exec + shell layers intact. Regression guard for the default-value
+# brace bug (MESSAGE="${3:-{...}}" appended a stray '}') that broke every wrapper publish.
+run_wrapper_publish_test() {
+    log_info "Phase 3: Wrapper publish round-trip..."
+    local marker='wrap-roundtrip-marker'
+    # Payload includes braces/quotes inside a string to stress shell quoting.
+    local payload="{\"deviceId\":\"$marker\",\"timestamp\":1,\"note\":\"a{b}c\"}"
+
+    if ! docker compose up -d --build --wait yirangmq >/dev/null 2>&1; then
+        log_error "Wrapper round-trip: daemon failed to start"
+        exit 1
+    fi
+
+    local pub
+    pub=$("$0" publish telemetry "$payload" 2>&1)
+    if ! echo "$pub" | grep -q 'published successfully'; then
+        log_error "Wrapper round-trip: publish did not succeed — $pub"
+        docker compose down -v >/dev/null 2>&1
+        exit 1
+    fi
+
+    local con
+    con=$("$0" consume telemetry 2>&1)
+    docker compose down -v >/dev/null 2>&1
+
+    if echo "$con" | grep -q "$marker"; then
+        log_info "Wrapper publish round-trip (JSON payload intact): PASS"
+    else
+        log_error "Wrapper round-trip: payload not delivered intact — $con"
+        exit 1
+    fi
+}
+
 case "${1:-help}" in
     up)
         log_info "Starting Yi-Rang MQ..."
@@ -93,6 +131,17 @@ case "${1:-help}" in
         docker compose build --no-cache
         ;;
 
+    buildx)
+        # Cross-build the deployable runtime image for an embedded target platform. (F-14)
+        # Uses QEMU emulation via buildx, so the vcpkg dependency build is slow — intended for
+        # CI or a one-off image bake, not the local dev loop. Requires: docker buildx + binfmt.
+        PLATFORM="${2:-linux/arm64}"
+        TAG="yirangmq:${PLATFORM//\//-}"
+        log_info "Cross-building runtime image for $PLATFORM (QEMU emulation — this is slow)..."
+        docker buildx build --platform "$PLATFORM" --target runtime -f Dockerfile -t "$TAG" --load ..
+        log_pass_or_fail "buildx $PLATFORM" $?
+        ;;
+
     logs)
         shift
         docker compose logs "${@:--f}"
@@ -102,7 +151,7 @@ case "${1:-help}" in
         docker compose ps
         echo ""
         log_info "Health check:"
-        docker compose exec yirangmq /app/yirangmq-cli-publisher health 2>/dev/null || log_warn "Service not running"
+        docker compose exec -T yirangmq /app/yirangmq-cli-publisher health 2>/dev/null || log_warn "Service not running"
         ;;
 
     cli)
@@ -113,23 +162,28 @@ case "${1:-help}" in
     # Publisher commands
     publish)
         QUEUE="${2:-telemetry}"
-        MESSAGE="${3:-{\"test\":true}}"
+        # Set the default separately: a JSON default inside ${3:-...} would let the inner '}'
+        # terminate the parameter expansion early and append a stray '}' to the message.
+        MESSAGE="${3-}"
+        if [ -z "$MESSAGE" ]; then
+            MESSAGE='{"test":true}'
+        fi
         shift 3 2>/dev/null || true
         log_info "Publishing to queue: $QUEUE"
-        docker compose exec yirangmq /app/yirangmq-cli-publisher --queue "$QUEUE" --message "$MESSAGE" "$@"
+        docker compose exec -T yirangmq /app/yirangmq-cli-publisher --queue "$QUEUE" --message "$MESSAGE" "$@"
         ;;
 
     health)
-        docker compose exec yirangmq /app/yirangmq-cli-publisher health
+        docker compose exec -T yirangmq /app/yirangmq-cli-publisher health
         ;;
 
     metrics)
-        docker compose exec yirangmq /app/yirangmq-cli-publisher metrics
+        docker compose exec -T yirangmq /app/yirangmq-cli-publisher metrics
         ;;
 
     queue-status)
         QUEUE="${2:-telemetry}"
-        docker compose exec yirangmq /app/yirangmq-cli-publisher status --queue "$QUEUE"
+        docker compose exec -T yirangmq /app/yirangmq-cli-publisher status --queue "$QUEUE"
         ;;
 
     # Consumer commands
@@ -137,7 +191,7 @@ case "${1:-help}" in
         QUEUE="${2:-telemetry}"
         CONSUMER_ID="${3:-docker-consumer}"
         log_info "Consuming from queue: $QUEUE"
-        docker compose exec yirangmq /app/yirangmq-cli-consumer consume --queue "$QUEUE" --consumer-id "$CONSUMER_ID"
+        docker compose exec -T yirangmq /app/yirangmq-cli-consumer consume --queue "$QUEUE" --consumer-id "$CONSUMER_ID"
         ;;
 
     ack)
@@ -147,7 +201,7 @@ case "${1:-help}" in
             exit 1
         fi
         log_info "Acknowledging message: $MESSAGE_KEY"
-        docker compose exec yirangmq /app/yirangmq-cli-consumer ack --message-key "$MESSAGE_KEY"
+        docker compose exec -T yirangmq /app/yirangmq-cli-consumer ack --message-key "$MESSAGE_KEY"
         ;;
 
     nack)
@@ -158,7 +212,7 @@ case "${1:-help}" in
         fi
         shift 2
         log_info "Nacking message: $MESSAGE_KEY"
-        docker compose exec yirangmq /app/yirangmq-cli-consumer nack --message-key "$MESSAGE_KEY" "$@"
+        docker compose exec -T yirangmq /app/yirangmq-cli-consumer nack --message-key "$MESSAGE_KEY" "$@"
         ;;
 
     extend-lease)
@@ -169,13 +223,13 @@ case "${1:-help}" in
         fi
         shift 2
         log_info "Extending lease for message: $MESSAGE_KEY"
-        docker compose exec yirangmq /app/yirangmq-cli-consumer extend-lease --message-key "$MESSAGE_KEY" "$@"
+        docker compose exec -T yirangmq /app/yirangmq-cli-consumer extend-lease --message-key "$MESSAGE_KEY" "$@"
         ;;
 
     list-dlq)
         QUEUE="${2:-telemetry}"
         log_info "Listing DLQ for queue: $QUEUE"
-        docker compose exec yirangmq /app/yirangmq-cli-consumer list-dlq --queue "$QUEUE"
+        docker compose exec -T yirangmq /app/yirangmq-cli-consumer list-dlq --queue "$QUEUE"
         ;;
 
     reprocess)
@@ -185,7 +239,7 @@ case "${1:-help}" in
             exit 1
         fi
         log_info "Reprocessing DLQ message: $MESSAGE_KEY"
-        docker compose exec yirangmq /app/yirangmq-cli-consumer reprocess --message-key "$MESSAGE_KEY"
+        docker compose exec -T yirangmq /app/yirangmq-cli-consumer reprocess --message-key "$MESSAGE_KEY"
         ;;
 
     # Test commands
@@ -198,6 +252,11 @@ case "${1:-help}" in
         docker compose build yirangmq-integration-test 2>&1
         log_pass_or_fail "Integration build" $?
         docker compose run --rm yirangmq-integration-test
+        run_wrapper_publish_test
+        ;;
+
+    test-wrapper)
+        run_wrapper_publish_test
         ;;
 
     test-unit)

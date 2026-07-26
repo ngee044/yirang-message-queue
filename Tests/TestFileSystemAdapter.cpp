@@ -2,6 +2,8 @@
 #include "FileSystemAdapter.h"
 #include <gtest/gtest.h>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <thread>
 #include <chrono>
 
@@ -174,6 +176,54 @@ TEST_F(FileSystemAdapterTest, NackToDlq)
 }
 
 // ---------------------------------------------------------------------------
+// NackRejectsWrongConsumer (Defect D-03): nack from a consumer that does not own
+// the lease must be rejected, matching ack/extend_lease fencing. The owner can
+// still nack afterwards.
+// ---------------------------------------------------------------------------
+TEST_F(FileSystemAdapterTest, NackRejectsWrongConsumer)
+{
+	auto env = make_envelope("fencing_q", R"({"id":"X"})");
+	adapter_->enqueue(env);
+
+	auto result = adapter_->lease_next("fencing_q", "w1", 30);
+	ASSERT_TRUE(result.leased);
+	ASSERT_TRUE(result.lease.has_value());
+
+	// Empty lease_id isolates the consumer-id fencing (empty is the backward-compat path).
+	LeaseToken forged = result.lease.value();
+	forged.consumer_id = "attacker-w2";
+	forged.lease_id = "";
+
+	auto [nok, nerr] = adapter_->nack(forged, "spoofed", true);
+	EXPECT_FALSE(nok) << "nack from a non-owning consumer must be rejected";
+	EXPECT_TRUE(nerr.has_value());
+
+	// The legitimate owner can still nack.
+	auto [nok2, nerr2] = adapter_->nack(result.lease.value(), "real", true);
+	EXPECT_TRUE(nok2) << "owner nack should succeed: " << nerr2.value_or("unknown");
+}
+
+// ---------------------------------------------------------------------------
+// NackRejectsExpiredLease (Defect D-03): a holder whose lease has expired must
+// not be able to nack — the message may already have been reclaimed/re-leased.
+// ---------------------------------------------------------------------------
+TEST_F(FileSystemAdapterTest, NackRejectsExpiredLease)
+{
+	auto env = make_envelope("fencing_q2", R"({"id":"Y"})");
+	adapter_->enqueue(env);
+
+	auto result = adapter_->lease_next("fencing_q2", "w1", 1);
+	ASSERT_TRUE(result.leased);
+	ASSERT_TRUE(result.lease.has_value());
+
+	std::this_thread::sleep_for(std::chrono::milliseconds(1300));
+
+	auto [nok, nerr] = adapter_->nack(result.lease.value(), "late", true);
+	EXPECT_FALSE(nok) << "nack after lease expiry must be rejected";
+	EXPECT_TRUE(nerr.has_value());
+}
+
+// ---------------------------------------------------------------------------
 // ExtendLease: extend lease updates expiry
 // ---------------------------------------------------------------------------
 TEST_F(FileSystemAdapterTest, ExtendLease)
@@ -261,6 +311,65 @@ TEST_F(FileSystemAdapterTest, PolicySaveLoad)
 	EXPECT_TRUE(loaded->dlq.enabled);
 	EXPECT_EQ(loaded->dlq.queue, "policy_q_dlq");
 	EXPECT_EQ(loaded->dlq.retention_days, 14);
+}
+
+// ---------------------------------------------------------------------------
+// AtomicWriteFailureDoesNotClobberExistingFile (Defect D-02)
+// A durable write that cannot complete must abort BEFORE the rename, leaving the
+// previously-persisted file byte-for-byte intact instead of replacing it with a
+// truncated/empty file. Failure is simulated by occupying "<file>.tmp" with a
+// non-empty directory so the temp open() fails (EISDIR).
+// ---------------------------------------------------------------------------
+TEST_F(FileSystemAdapterTest, AtomicWriteFailureDoesNotClobberExistingFile)
+{
+	QueuePolicy original;
+	original.visibility_timeout_sec = 45;
+	original.retry.limit = 5;
+	original.retry.backoff = "exponential";
+
+	auto [sok, serr] = adapter_->save_policy("dfull_q", original);
+	ASSERT_TRUE(sok) << "initial save_policy failed: " << serr.value_or("unknown");
+
+	const auto policy_file = temp_dir_->path() + "/fs/meta/policy_dfull_q.json";
+	ASSERT_TRUE(fs::exists(policy_file));
+
+	std::string original_content;
+	{
+		std::ifstream in(policy_file, std::ios::binary);
+		ASSERT_TRUE(in.is_open());
+		original_content.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+	}
+	ASSERT_FALSE(original_content.empty());
+
+	// Block the temp write: a non-empty directory at "<file>.tmp" makes open() fail and
+	// survives atomic_write's cleanup remove(), so the write cannot be promoted.
+	const auto blocking_tmp = policy_file + ".tmp";
+	std::error_code ec;
+	fs::create_directory(blocking_tmp, ec);
+	ASSERT_FALSE(ec) << "could not set up blocking temp dir";
+	{
+		std::ofstream keep(blocking_tmp + "/keep");
+		keep << "x";
+	}
+
+	QueuePolicy changed;
+	changed.visibility_timeout_sec = 999;
+	changed.retry.limit = 1;
+	changed.retry.backoff = "fixed";
+
+	auto [ok2, err2] = adapter_->save_policy("dfull_q", changed);
+	EXPECT_FALSE(ok2) << "save_policy must fail when the durable write cannot complete";
+	EXPECT_TRUE(err2.has_value());
+
+	std::string after_content;
+	{
+		std::ifstream in(policy_file, std::ios::binary);
+		ASSERT_TRUE(in.is_open());
+		after_content.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+	}
+	EXPECT_EQ(after_content, original_content) << "existing file was clobbered by a failed write";
+
+	fs::remove_all(blocking_tmp, ec);
 }
 
 // ---------------------------------------------------------------------------

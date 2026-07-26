@@ -437,7 +437,7 @@ auto SQLiteAdapter::ack(const LeaseToken& lease) -> std::tuple<bool, std::option
 		return { false, "failed to delete from msg_index" };
 	}
 
-	if (affected_rows(db_) == 0)
+	if (affected_rows(db_) <= 0)
 	{
 		db_.rollback();
 		return { false, "ack rejected: message is not inflight (lease expired or already settled)" };
@@ -474,7 +474,7 @@ auto SQLiteAdapter::ack(const LeaseToken& lease) -> std::tuple<bool, std::option
 	return { true, std::nullopt };
 }
 
-auto SQLiteAdapter::nack(const LeaseToken& lease, const std::string& reason, const bool& requeue)
+auto SQLiteAdapter::nack(const LeaseToken& lease, const std::string& reason, const bool& requeue, int32_t retry_limit)
 	-> std::tuple<bool, std::optional<std::string>>
 {
 	std::lock_guard<std::mutex> lock(db_mutex_);
@@ -486,7 +486,27 @@ auto SQLiteAdapter::nack(const LeaseToken& lease, const std::string& reason, con
 
 	auto now = current_time_ms();
 
-	if (requeue)
+	// Cap explicit requeue: if the message has already reached the retry limit, route it to
+	// DLQ instead of ready to prevent an infinite nack-requeue loop on a poison message. (D-06)
+	bool effective_requeue = requeue;
+	if (requeue && retry_limit >= 0)
+	{
+		std::string attempt_sql = std::format(
+			"SELECT attempt FROM {} WHERE message_key = ? AND state = 'inflight';",
+			sqlite_config_.message_index_table
+		);
+		auto [attempt_stmt, attempt_error] = db_.prepare(attempt_sql);
+		if (attempt_stmt)
+		{
+			attempt_stmt->bind_text(1, lease.message_key);
+			if (attempt_stmt->step() == SQLITE_ROW && attempt_stmt->column_int(0) >= retry_limit)
+			{
+				effective_requeue = false;
+			}
+		}
+	}
+
+	if (effective_requeue)
 	{
 		auto [tx_ok, tx_error] = db_.begin_transaction();
 		if (!tx_ok)
@@ -518,7 +538,7 @@ auto SQLiteAdapter::nack(const LeaseToken& lease, const std::string& reason, con
 			return { false, "failed to requeue message" };
 		}
 
-		if (affected_rows(db_) == 0)
+		if (affected_rows(db_) <= 0)
 		{
 			db_.rollback();
 			return { false, "nack rejected: message is not inflight (lease expired or already settled)" };
@@ -540,9 +560,9 @@ auto SQLiteAdapter::nack(const LeaseToken& lease, const std::string& reason, con
 			return { false, tx_error };
 		}
 
-		// Update state to dlq
+		// Update state to dlq, recording reason and timestamp so list-dlq can show them. (D-13)
 		std::string idx_sql = std::format(
-			"UPDATE {} SET state = 'dlq', lease_until = NULL WHERE message_key = ? AND state = 'inflight' AND (? = '' OR lease_id = ?);",
+			"UPDATE {} SET state = 'dlq', lease_until = NULL, dlq_reason = ?, dlq_at = ? WHERE message_key = ? AND state = 'inflight' AND (? = '' OR lease_id = ?);",
 			sqlite_config_.message_index_table
 		);
 
@@ -553,9 +573,11 @@ auto SQLiteAdapter::nack(const LeaseToken& lease, const std::string& reason, con
 			return { false, idx_error };
 		}
 
-		idx_stmt->bind_text(1, lease.message_key);
-		idx_stmt->bind_text(2, lease.lease_id);
-		idx_stmt->bind_text(3, lease.lease_id);
+		idx_stmt->bind_text(1, reason);
+		idx_stmt->bind_int64(2, current_time_ms());
+		idx_stmt->bind_text(3, lease.message_key);
+		idx_stmt->bind_text(4, lease.lease_id);
+		idx_stmt->bind_text(5, lease.lease_id);
 
 		if (idx_stmt->step() != SQLITE_DONE)
 		{
@@ -563,7 +585,7 @@ auto SQLiteAdapter::nack(const LeaseToken& lease, const std::string& reason, con
 			return { false, "failed to move message to dlq" };
 		}
 
-		if (affected_rows(db_) == 0)
+		if (affected_rows(db_) <= 0)
 		{
 			db_.rollback();
 			return { false, "nack rejected: message is not inflight (lease expired or already settled)" };
@@ -667,7 +689,7 @@ auto SQLiteAdapter::extend_lease(const LeaseToken& lease, const int32_t& visibil
 		return { false, "failed to extend lease" };
 	}
 
-	if (affected_rows(db_) == 0)
+	if (affected_rows(db_) <= 0)
 	{
 		db_.rollback();
 		return { false, "extend_lease rejected: lease not held or already expired" };
@@ -1464,4 +1486,93 @@ auto SQLiteAdapter::purge_expired_messages(void) -> std::tuple<int32_t, std::opt
 	}
 
 	return { static_cast<int32_t>(expired_keys.size()), std::nullopt };
+}
+
+auto SQLiteAdapter::purge_dlq_messages(const std::string& queue, int64_t older_than_ms) -> std::tuple<int32_t, std::optional<std::string>>
+{
+	std::lock_guard<std::mutex> lock(db_mutex_);
+
+	if (!db_.is_open())
+	{
+		return { 0, "database is not open" };
+	}
+
+	auto [tx_ok, tx_error] = db_.begin_transaction();
+	if (!tx_ok)
+	{
+		return { 0, tx_error };
+	}
+
+	// DLQ entries with a recorded dlq_at at or before the cutoff are past retention. (D-07)
+	std::string select_sql = std::format(
+		"SELECT message_key FROM {} WHERE queue = ? AND state = 'dlq' AND dlq_at > 0 AND dlq_at <= ?;",
+		sqlite_config_.message_index_table
+	);
+
+	auto [select_stmt, select_error] = db_.prepare(select_sql);
+	if (!select_stmt)
+	{
+		db_.rollback();
+		return { 0, select_error };
+	}
+
+	select_stmt->bind_text(1, queue);
+	select_stmt->bind_int64(2, older_than_ms);
+
+	std::vector<std::string> keys;
+	while (select_stmt->step() == SQLITE_ROW)
+	{
+		keys.push_back(select_stmt->column_text(0));
+	}
+
+	if (keys.empty())
+	{
+		db_.rollback();
+		return { 0, std::nullopt };
+	}
+
+	std::string delete_idx_sql = std::format(
+		"DELETE FROM {} WHERE queue = ? AND state = 'dlq' AND dlq_at > 0 AND dlq_at <= ?;",
+		sqlite_config_.message_index_table
+	);
+
+	auto [del_stmt, del_error] = db_.prepare(delete_idx_sql);
+	if (!del_stmt)
+	{
+		db_.rollback();
+		return { 0, del_error };
+	}
+
+	del_stmt->bind_text(1, queue);
+	del_stmt->bind_int64(2, older_than_ms);
+
+	if (del_stmt->step() != SQLITE_DONE)
+	{
+		db_.rollback();
+		return { 0, "failed to delete dlq messages from index" };
+	}
+
+	for (const auto& key : keys)
+	{
+		std::string delete_kv_sql = std::format(
+			"DELETE FROM {} WHERE key = ?;",
+			sqlite_config_.kv_table
+		);
+
+		auto [kv_stmt, kv_error] = db_.prepare(delete_kv_sql);
+		if (kv_stmt)
+		{
+			kv_stmt->bind_text(1, key);
+			kv_stmt->step();
+		}
+	}
+
+	auto [commit_ok, commit_error] = db_.commit();
+	if (!commit_ok)
+	{
+		db_.rollback();
+		return { 0, commit_error };
+	}
+
+	return { static_cast<int32_t>(keys.size()), std::nullopt };
 }

@@ -488,8 +488,11 @@ namespace Utilities
 				continue;
 			}
 
-			auto hours = std::chrono::duration_cast<std::chrono::hours>(std::chrono::system_clock::now().time_since_epoch()
-																		- std::filesystem::last_write_time(iterator->path().string()).time_since_epoch());
+			// Use the file clock's own now(): mixing system_clock and file_clock epochs (they
+			// differ on libstdc++) made every .log look decades old and be deleted at startup. (D-08)
+			auto hours = std::chrono::duration_cast<std::chrono::hours>(
+				std::filesystem::file_time_type::clock::now()
+				- std::filesystem::last_write_time(iterator->path().string()));
 
 			if ((hours.count() / 24) > life_cycle_period_.load())
 			{

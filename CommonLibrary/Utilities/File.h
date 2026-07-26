@@ -45,6 +45,12 @@ namespace Utilities
 		std::ios_base::openmode openmode_;
 	};
 
-	auto fsync_file(const std::string& path) -> void;
-	auto fsync_parent_directory(const std::string& path) -> void;
+	auto fsync_file(const std::string& path) -> bool;
+	auto fsync_parent_directory(const std::string& path) -> bool;
+
+	// Durably write content to path, failing (rather than silently truncating) if any
+	// step cannot complete — e.g. ENOSPC on a full disk. On POSIX this writes through a
+	// single fd and checks write()/fsync()/close(), so a short write surfaces as an error
+	// instead of leaving a partial file behind.
+	auto write_file_durable(const std::string& path, const std::string& content) -> std::tuple<bool, std::optional<std::string>>;
 }

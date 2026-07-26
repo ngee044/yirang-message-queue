@@ -73,6 +73,27 @@ cd yirang-mq/docker
 ./build/out/yirangmq-cli-consumer
 ```
 
+### Option 3: 임베디드 타깃 크로스컴파일
+
+레거시/저사양 임베디드(ARM 등)로 배포할 때는 크로스 툴체인으로 빌드한다.
+
+```bash
+# 크로스 툴체인 + vcpkg triplet 지정, 작은 정적 바이너리로 빌드
+./build.sh -m --static \
+  --triplet arm64-linux \
+  --toolchain /path/to/arm64-toolchain.cmake
+
+# 또는 Docker buildx로 배포용 런타임 이미지를 크로스 빌드 (QEMU 에뮬레이션, 느림)
+cd docker && ./docker-compose.sh buildx linux/arm64
+```
+
+- `--triplet`: vcpkg 타깃 triplet(예: `arm64-linux`, `arm-linux`). 의존성이 타깃 아키텍처로 빌드된다.
+- `--toolchain`: CMake 크로스 툴체인 파일(vcpkg가 chainload). 타깃 컴파일러/시스루트를 지정.
+- `--static`: 런타임 정적 링크(glibc/musl 버전 비의존) — 구형 임베디드 배포에 유용.
+- `-m/--minsize`: MinSizeRel(최소 크기 바이너리).
+
+> 실제 타깃별 툴체인 파일과 triplet은 배포 대상 하드웨어에 맞춰 준비한다. QEMU buildx 빌드는 CI/일회성 이미지 제작용이며 로컬 개발 루프에는 부적합하다.
+
 ---
 
 ## 핵심 기능
@@ -313,6 +334,7 @@ cd build/out
 | `consume` | 메시지 소비 |
 | `ack` | 메시지 처리 완료 확인 |
 | `nack` | 메시지 처리 실패 알림 |
+| `extend-lease` | Lease 가시성 시간 연장 |
 | `list-dlq` | DLQ 메시지 목록 |
 | `reprocess` | DLQ 메시지 재처리 |
 | `help` | 도움말 표시 |
@@ -603,17 +625,19 @@ cd docker
 ./docker-compose.sh down
 ```
 
-### 로컬 통합 테스트
+### 통합 테스트
+
+로컬 macOS는 efsw vcpkg 빌드가 불가하므로 테스트는 Docker로 실행한다.
 
 ```bash
-# Mailbox IPC 테스트
-./test_mailbox.sh
+cd docker
 
-# 전체 백엔드 모드 테스트
-./test_all_modes.sh
+# 단위 + 통합 전체
+./docker-compose.sh test
 
-# Fault tolerance 테스트
-./test_fault.sh
+# 단위만 / 통합만
+./docker-compose.sh test-unit
+./docker-compose.sh test-integration
 ```
 
 ---

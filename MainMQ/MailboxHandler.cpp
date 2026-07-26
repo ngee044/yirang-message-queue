@@ -247,14 +247,16 @@ auto MailboxHandler::on_file_changed(const std::string& dir, const std::string& 
 		return;
 	}
 
-	std::filesystem::path file_path = dir;
-	file_path /= filename;
-
+	// Wake hint only: flag that a rescan is due and let the event loop scan requests/ as the
+	// single source of truth. Enqueuing here too would double-add every request (the loop
+	// rescan re-adds the same file), producing spurious "file disappeared" logs. (D-01)
 	{
 		std::lock_guard<std::mutex> lock(pending_mutex_);
-		pending_requests_.push(file_path.string());
+		rescan_requested_ = true;
 	}
-	pending_cv_.notify_one();
+	// notify_all (not notify_one): the request worker and the stale-cleanup worker both wait
+	// on pending_cv_, so notify_one could wake the wrong one and delay the request. (D-31)
+	pending_cv_.notify_all();
 }
 
 auto MailboxHandler::process_pending_requests(void) -> void
@@ -396,33 +398,30 @@ auto MailboxHandler::scan_and_enqueue_requests(const std::string& request_dir) -
 
 auto MailboxHandler::request_processing_worker(void) -> void
 {
-	// Process any existing files on startup
 	auto request_dir = build_path(config_.requests_dir);
-	scan_and_enqueue_requests(request_dir);
 
 	while (running_.load())
 	{
 		if (use_folder_watcher_)
 		{
-			// Event-driven mode: a FolderWatcher notification (or the timeout) wakes us.
-			{
-				std::unique_lock<std::mutex> lock(pending_mutex_);
-				pending_cv_.wait_for(lock, std::chrono::milliseconds(config_.poll_interval_ms), [this]()
-				{
-					return !pending_requests_.empty() || !running_.load();
-				});
-			}
+			// The directory rescan is the single source of truth: efsw reports the client's
+			// atomic rename as Moved (not Add) and can drop events, so we scan requests/ at
+			// startup (first iteration) and on every wake, then process. on_file_changed only
+			// sets rescan_requested_ to wake us sooner — it does not enqueue. (D-01)
+			scan_and_enqueue_requests(request_dir);
+			process_pending_requests();
 
 			if (!running_.load())
 			{
 				break;
 			}
 
-			// Rescan the directory on every wake: efsw reports the client's atomic rename
-			// as Moved (not Add) and can drop events entirely, so the scan — not the event
-			// stream — is the source of truth. The event only wakes us sooner. (D-01)
-			scan_and_enqueue_requests(request_dir);
-			process_pending_requests();
+			std::unique_lock<std::mutex> lock(pending_mutex_);
+			pending_cv_.wait_for(lock, std::chrono::milliseconds(config_.poll_interval_ms), [this]()
+			{
+				return rescan_requested_ || !running_.load();
+			});
+			rescan_requested_ = false;
 		}
 		else
 		{
@@ -501,7 +500,13 @@ auto MailboxHandler::request_processing_worker(void) -> void
 				delete_processed(processing_path);
 			}
 
-			std::this_thread::sleep_for(std::chrono::milliseconds(config_.poll_interval_ms));
+			// Interruptible wait (not sleep_for) so stop()'s notify_all wakes the poll loop
+			// immediately instead of blocking up to a full interval. (Defect D-31)
+			std::unique_lock<std::mutex> lock(pending_mutex_);
+			pending_cv_.wait_for(lock, std::chrono::milliseconds(config_.poll_interval_ms), [this]()
+			{
+				return !running_.load();
+			});
 		}
 	}
 }
@@ -512,6 +517,7 @@ auto MailboxHandler::stale_cleanup_worker(void) -> void
 	{
 		cleanup_stale_requests();
 		cleanup_stale_responses();
+		cleanup_stale_dead();
 
 		// Use condition variable so stop() can wake us immediately
 		std::unique_lock<std::mutex> lock(pending_mutex_);
@@ -575,17 +581,15 @@ auto MailboxHandler::atomic_write(const std::string& target_path, const std::str
 {
 	auto temp_path = target_path + ".tmp";
 
-	std::ofstream file(temp_path, std::ios::out | std::ios::trunc);
-	if (!file.is_open())
+	// Durable, fail-closed write: abort before rename if the temp cannot be fully written
+	// (e.g. ENOSPC), so a truncated response never replaces a valid one. (Defect D-02)
+	auto [write_ok, write_error] = Utilities::write_file_durable(temp_path, content);
+	if (!write_ok)
 	{
-		return { false, std::format("cannot create temp file: {}", temp_path) };
+		std::error_code ec;
+		std::filesystem::remove(temp_path, ec);
+		return { false, write_error };
 	}
-
-	file << content;
-	file.flush();
-	file.close();
-
-	Utilities::fsync_file(temp_path);
 
 	std::error_code ec;
 	std::filesystem::rename(temp_path, target_path, ec);
@@ -1023,7 +1027,25 @@ auto MailboxHandler::handle_nack(const MailboxRequest& request) -> MailboxRespon
 		std::string reason = payload.value("reason", "");
 		bool requeue = payload.value("requeue", false);
 
-		auto [ok, error] = backend_->nack(lease, reason, requeue);
+		// Pass the queue's retry limit so the backend caps requeue at it (poison-loop guard).
+		// message_key is "msg:{queue}:{id}"; -1 (no policy) leaves the legacy uncapped behavior. (D-06)
+		int32_t retry_limit = -1;
+		if (queue_manager_)
+		{
+			auto first = lease.message_key.find(':');
+			auto last = lease.message_key.rfind(':');
+			if (first != std::string::npos && last != std::string::npos && last > first)
+			{
+				auto queue = lease.message_key.substr(first + 1, last - first - 1);
+				auto policy = queue_manager_->get_policy(queue);
+				if (policy.has_value())
+				{
+					retry_limit = policy->retry.limit;
+				}
+			}
+		}
+
+		auto [ok, error] = backend_->nack(lease, reason, requeue, retry_limit);
 		if (!ok)
 		{
 			return build_error_response(request.request_id, MailboxErrorCode::INTERNAL_ERROR, error.value_or("nack failed"));
@@ -1220,6 +1242,39 @@ auto MailboxHandler::cleanup_stale_responses(void) -> void
 			{
 				std::filesystem::remove(file_path, file_ec);
 			}
+		}
+	}
+}
+
+auto MailboxHandler::cleanup_stale_dead(void) -> void
+{
+	// dead/ holds rejected/expired requests (and their .reason sidecars) kept for field
+	// diagnosis. Without GC they accumulate forever and exhaust small embedded flash, so
+	// remove entries older than the configured retention. (Defect D-14)
+	auto dead_dir = build_path(config_.dead_dir);
+
+	std::error_code ec;
+	for (const auto& entry : std::filesystem::directory_iterator(dead_dir, ec))
+	{
+		if (!entry.is_regular_file())
+		{
+			continue;
+		}
+
+		std::error_code file_ec;
+		auto last_write = std::filesystem::last_write_time(entry.path(), file_ec);
+		if (file_ec)
+		{
+			continue;
+		}
+
+		auto file_age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+			std::filesystem::file_time_type::clock::now() - last_write
+		).count();
+
+		if (file_age_ms > config_.dead_retention_ms)
+		{
+			std::filesystem::remove(entry.path(), file_ec);
 		}
 	}
 }
@@ -1541,6 +1596,16 @@ auto MailboxHandler::handle_batch_publish(const MailboxRequest& request) -> Mail
 
 		auto [success_count, error] = backend_->batch_enqueue(envelopes);
 
+		// Messages dropped by validation reduce envelopes.size() up front and are reported as
+		// skipped; a shortfall below that count means the backend failed to persist some — do
+		// not report the batch as fully successful in that case. (Defect D-21)
+		if (success_count < static_cast<int32_t>(envelopes.size()))
+		{
+			return build_error_response(request.request_id, MailboxErrorCode::INTERNAL_ERROR,
+				std::format("batch enqueue persisted {} of {} messages: {}",
+					success_count, envelopes.size(), error.value_or("backend error")));
+		}
+
 		json result;
 		result["published"] = success_count;
 		result["total"] = static_cast<int32_t>(messages_array.size());
@@ -1567,7 +1632,9 @@ auto MailboxHandler::handle_batch_consume(const MailboxRequest& request) -> Mail
 			return build_error_response(request.request_id, MailboxErrorCode::INVALID_REQUEST, "queue is required");
 		}
 
-		std::string consumer_id = payload.value("consumerId", "");
+		// Default to the requesting client's id, matching single consume, so the lease owner
+		// is consistent between consume and batch-consume flows. (Defect D-30)
+		std::string consumer_id = payload.value("consumerId", request.client_id);
 		int32_t visibility_timeout = payload.value("visibilityTimeoutSec", 30);
 		int32_t max_messages = payload.value("maxMessages", 10);
 

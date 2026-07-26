@@ -21,7 +21,7 @@ public:
 	auto lease_next(const std::string& queue, const std::string& consumer_id, const int32_t& visibility_timeout_sec)
 		-> LeaseResult override;
 	auto ack(const LeaseToken& lease) -> std::tuple<bool, std::optional<std::string>> override;
-	auto nack(const LeaseToken& lease, const std::string& reason, const bool& requeue)
+	auto nack(const LeaseToken& lease, const std::string& reason, const bool& requeue, int32_t retry_limit = -1)
 		-> std::tuple<bool, std::optional<std::string>> override;
 	auto extend_lease(const LeaseToken& lease, const int32_t& visibility_timeout_sec)
 		-> std::tuple<bool, std::optional<std::string>> override;
@@ -42,6 +42,7 @@ public:
 	auto reprocess_dlq_message(const std::string& message_key) -> std::tuple<bool, std::optional<std::string>> override;
 
 	auto purge_expired_messages(void) -> std::tuple<int32_t, std::optional<std::string>> override;
+	auto purge_dlq_messages(const std::string& queue, int64_t older_than_ms) -> std::tuple<int32_t, std::optional<std::string>> override;
 
 	// Consistency check and repair
 	auto check_consistency(const std::string& queue = "")

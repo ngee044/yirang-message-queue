@@ -381,7 +381,7 @@ auto FileSystemAdapter::ack(const LeaseToken& lease) -> std::tuple<bool, std::op
 	return { true, std::nullopt };
 }
 
-auto FileSystemAdapter::nack(const LeaseToken& lease, const std::string& reason, const bool& requeue)
+auto FileSystemAdapter::nack(const LeaseToken& lease, const std::string& reason, const bool& requeue, int32_t retry_limit)
 	-> std::tuple<bool, std::optional<std::string>>
 {
 	std::lock_guard<std::mutex> lock(mutex_);
@@ -405,6 +405,21 @@ auto FileSystemAdapter::nack(const LeaseToken& lease, const std::string& reason,
 		return { false, "lease_id mismatch (stale or forged lease token)" };
 	}
 
+	// Fence a stale holder the same way ack/extend_lease do: reject a nack whose lease has
+	// expired (and may already be re-leased) or whose consumer identity does not match.
+	// Without this, a timed-out holder could requeue/DLQ a message now owned by another
+	// consumer, causing double delivery or wrongful DLQ. (Defect D-03)
+	auto now = current_time_ms();
+	if (now > meta.lease_until_ms)
+	{
+		return { false, "lease expired" };
+	}
+
+	if (meta.consumer_id != lease.consumer_id)
+	{
+		return { false, "consumer_id mismatch" };
+	}
+
 	// Extract filename from message key
 	auto parts = lease.message_key.rfind(':');
 	if (parts == std::string::npos)
@@ -416,7 +431,15 @@ auto FileSystemAdapter::nack(const LeaseToken& lease, const std::string& reason,
 
 	auto processing_path = build_queue_path(meta.queue, fs_config_.processing_dir, filename);
 
-	if (requeue)
+	// Cap explicit requeue: a message that has reached the retry limit goes to DLQ instead of
+	// back to inbox, preventing an infinite nack-requeue loop on a poison message. (Defect D-06)
+	bool effective_requeue = requeue;
+	if (requeue && retry_limit >= 0 && meta.attempt >= retry_limit)
+	{
+		effective_requeue = false;
+	}
+
+	if (effective_requeue)
 	{
 		// Move back to inbox
 		auto inbox_path = build_queue_path(meta.queue, fs_config_.inbox_dir, filename);
@@ -960,17 +983,16 @@ auto FileSystemAdapter::atomic_write(const std::string& target_path, const std::
 {
 	auto temp_path = target_path + ".tmp";
 
-	std::ofstream file(temp_path, std::ios::out | std::ios::trunc);
-	if (!file.is_open())
+	// Write the temp file durably and verify every step. If the write cannot complete
+	// (e.g. ENOSPC on a full flash), abort WITHOUT renaming: a partial temp must never be
+	// promoted over a valid target. The original file is left untouched. (Defect D-02)
+	auto [write_ok, write_error] = Utilities::write_file_durable(temp_path, content);
+	if (!write_ok)
 	{
-		return { false, std::format("cannot create temp file: {}", temp_path) };
+		std::error_code ec;
+		std::filesystem::remove(temp_path, ec);
+		return { false, write_error };
 	}
-
-	file << content;
-	file.flush();
-	file.close();
-
-	Utilities::fsync_file(temp_path);
 
 	std::error_code ec;
 	std::filesystem::rename(temp_path, target_path, ec);
@@ -980,6 +1002,7 @@ auto FileSystemAdapter::atomic_write(const std::string& target_path, const std::
 		return { false, std::format("rename failed: {}", ec.message()) };
 	}
 
+	// Best-effort durability of the rename itself; the new content is already visible.
 	Utilities::fsync_parent_directory(target_path);
 
 	return { true, std::nullopt };
@@ -1436,6 +1459,63 @@ auto FileSystemAdapter::purge_expired_messages(void) -> std::tuple<int32_t, std:
 			catch (...)
 			{
 				continue;
+			}
+		}
+	}
+
+	return { purged, std::nullopt };
+}
+
+auto FileSystemAdapter::purge_dlq_messages(const std::string& queue, int64_t older_than_ms) -> std::tuple<int32_t, std::optional<std::string>>
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+
+	if (!is_open_)
+	{
+		return { 0, "adapter not open" };
+	}
+
+	auto dlq_dir = build_queue_path(queue, fs_config_.dlq_dir);
+
+	std::error_code ec;
+	if (!std::filesystem::exists(dlq_dir, ec))
+	{
+		return { 0, std::nullopt };
+	}
+
+	int32_t purged = 0;
+	for (const auto& entry : std::filesystem::directory_iterator(dlq_dir, ec))
+	{
+		if (!entry.is_regular_file() || entry.path().extension() != ".json")
+		{
+			continue;
+		}
+
+		auto [content, read_error] = read_file(entry.path().string());
+		if (!content.has_value())
+		{
+			continue;
+		}
+
+		int64_t dlq_at = 0;
+		try
+		{
+			json envelope = json::parse(content.value());
+			dlq_at = envelope.value("dlqAt", static_cast<int64_t>(0));
+		}
+		catch (...)
+		{
+			continue;
+		}
+
+		// dlq_at at or before the cutoff means the entry is past its retention window. (D-07)
+		if (dlq_at > 0 && dlq_at <= older_than_ms)
+		{
+			std::error_code rm_ec;
+			std::filesystem::remove(entry.path(), rm_ec);
+			if (!rm_ec)
+			{
+				purged++;
 			}
 		}
 	}

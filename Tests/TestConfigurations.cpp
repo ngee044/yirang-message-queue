@@ -482,6 +482,38 @@ TEST_F(ConfigurationsTest, QueuesParsing)
 }
 
 // =============================================================================
+// QueuePolicyInheritsTtlFromDefaults (Defect D-17)
+// A queue policy that omits ttlSec must inherit policyDefaults.ttlSec, exactly as
+// visibilityTimeout/retry/dlq do. Previously ttl_sec was not seeded from defaults,
+// so such a queue silently fell back to 0 (TTL disabled) and grew unbounded.
+// =============================================================================
+TEST_F(ConfigurationsTest, QueuePolicyInheritsTtlFromDefaults)
+{
+	json config = {
+		{"policyDefaults", {
+			{"ttlSec", 3600}
+		}},
+		{"queues", json::array({
+			{
+				{"name", "inherits_ttl"},
+				{"policy", {
+					{"visibilityTimeoutSec", 20}
+					// ttlSec intentionally omitted -> must inherit 3600 from defaults
+				}}
+			}
+		})}
+	};
+
+	ConfigFileGuard guard(config);
+	auto cfg = guard.make_configurations();
+	auto& queues = cfg->queues();
+
+	ASSERT_EQ(queues.size(), 1u);
+	EXPECT_EQ(queues[0].policy.ttl_sec, 3600)
+		<< "queue omitting ttlSec must inherit policyDefaults.ttlSec";
+}
+
+// =============================================================================
 // ValidationRuleLoading - all 8 rule types
 // =============================================================================
 

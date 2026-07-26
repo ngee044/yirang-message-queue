@@ -348,6 +348,29 @@ TEST_F(HybridAdapterTest, ConsistencyClean)
 }
 
 // ---------------------------------------------------------------------------
+// FreshArchiveNotFlaggedStale (Defect D-08): a just-archived payload must not be
+// reported as a stale archive. The old age calc subtracted a file_clock timestamp
+// from a system_clock one — mixing epochs (they differ on libstdc++), which flagged
+// every archive as stale and let repair delete it.
+// ---------------------------------------------------------------------------
+TEST_F(HybridAdapterTest, FreshArchiveNotFlaggedStale)
+{
+	auto env = make_envelope("stale_q", R"({"data":"x"})");
+	ASSERT_TRUE(std::get<0>(adapter_->enqueue(env)));
+
+	auto result = adapter_->lease_next("stale_q", "w1", 30);
+	ASSERT_TRUE(result.leased);
+	ASSERT_TRUE(result.lease.has_value());
+
+	auto [aok, aerr] = adapter_->ack(result.lease.value());
+	ASSERT_TRUE(aok) << "ack failed: " << aerr.value_or("unknown");
+
+	auto [report, check_err] = adapter_->check_consistency("stale_q");
+	ASSERT_FALSE(check_err.has_value()) << "check_consistency error: " << check_err.value_or("");
+	EXPECT_EQ(report.stale_archives, 0) << "a freshly-archived payload must not be flagged stale";
+}
+
+// ---------------------------------------------------------------------------
 // ConsistencyOrphanPayload: payload file exists with no DB index entry
 // ---------------------------------------------------------------------------
 TEST_F(HybridAdapterTest, ConsistencyOrphanPayload)

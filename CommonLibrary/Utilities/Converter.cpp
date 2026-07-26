@@ -78,10 +78,10 @@ namespace Utilities
 			return std::string();
 		}
 
-		// UTF-8 BOM
+		// UTF-8 BOM is 3 bytes (EF BB BF); skip all three, not two. (Defect D-16)
 		if (value.size() >= 3 && value[0] == 0xef && value[1] == 0xbb && value[2] == 0xbf)
 		{
-			return std::string((char*)value.data() + 2, value.size() - 2);
+			return std::string((char*)value.data() + 3, value.size() - 3);
 		}
 
 		// UTF-8 no BOM

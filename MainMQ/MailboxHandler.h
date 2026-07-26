@@ -87,6 +87,7 @@ private:
 	// Stale request handling
 	auto cleanup_stale_requests(void) -> void;
 	auto cleanup_stale_responses(void) -> void;
+	auto cleanup_stale_dead(void) -> void;
 
 	// Utilities
 	auto current_time_ms(void) -> int64_t;
@@ -112,5 +113,6 @@ private:
 	std::queue<std::string> pending_requests_;
 	std::mutex pending_mutex_;
 	std::condition_variable pending_cv_;
+	bool rescan_requested_ = false; // set by on_file_changed; the loop rescan is the source of truth
 	bool use_folder_watcher_;
 };

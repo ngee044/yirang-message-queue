@@ -233,6 +233,97 @@ TEST_F(SQLiteAdapterTest, NackWithoutRequeueMovesToDlq)
 	}
 }
 
+// TC-SQL-26 (Defect D-13): nack-to-DLQ must record the reason so list-dlq surfaces it.
+TEST_F(SQLiteAdapterTest, NackToDlqRecordsReason)
+{
+	auto env = make_envelope("dlq-reason-q", R"({"data":"x"})");
+	adapter_->enqueue(env);
+
+	auto result = adapter_->lease_next("dlq-reason-q", "consumer-1", 30);
+	ASSERT_TRUE(result.leased);
+	ASSERT_TRUE(result.lease.has_value());
+
+	auto [nok, nerr] = adapter_->nack(*result.lease, "fatal boom", false);
+	ASSERT_TRUE(nok) << "nack to dlq failed: " << nerr.value_or("unknown");
+
+	auto [dlq, derr] = adapter_->list_dlq_messages("dlq-reason-q", 10);
+	ASSERT_EQ(dlq.size(), 1u);
+	EXPECT_EQ(dlq[0].reason, "fatal boom") << "DLQ entry must record the nack reason";
+	EXPECT_GT(dlq[0].dlq_at_ms, 0) << "DLQ entry must record dlq_at timestamp";
+}
+
+// TC-SQL-17 (Defect D-06): explicit nack(requeue=true) must route to DLQ once the retry
+// limit is reached, instead of requeuing forever (poison-message loop guard).
+TEST_F(SQLiteAdapterTest, NackRequeueRoutesToDlqAtRetryLimit)
+{
+	auto env = make_envelope("poison_q", R"({"data":"x"})");
+	adapter_->enqueue(env);
+
+	auto result = adapter_->lease_next("poison_q", "w1", 30);   // attempt -> 1
+	ASSERT_TRUE(result.leased);
+	ASSERT_TRUE(result.lease.has_value());
+
+	// attempt (1) >= retry_limit (1): a requeue must be diverted to DLQ.
+	auto [nok, nerr] = adapter_->nack(*result.lease, "still failing", true, 1);
+	ASSERT_TRUE(nok) << "nack failed: " << nerr.value_or("unknown");
+
+	auto [metrics, merr] = adapter_->metrics("poison_q");
+	EXPECT_EQ(metrics.dlq, 1u) << "message at the retry limit must be moved to DLQ";
+	EXPECT_EQ(metrics.ready, 0u) << "message must not be requeued to ready at the retry limit";
+}
+
+// TC-SQL-18 (Defect D-06): below the retry limit, an explicit requeue still returns to ready.
+TEST_F(SQLiteAdapterTest, NackRequeueBelowLimitReturnsToReady)
+{
+	auto env = make_envelope("poison_q2", R"({"data":"y"})");
+	adapter_->enqueue(env);
+
+	auto result = adapter_->lease_next("poison_q2", "w1", 30);  // attempt -> 1
+	ASSERT_TRUE(result.leased);
+	ASSERT_TRUE(result.lease.has_value());
+
+	auto [nok, nerr] = adapter_->nack(*result.lease, "transient", true, 5);
+	ASSERT_TRUE(nok) << "nack failed: " << nerr.value_or("unknown");
+
+	auto [metrics, merr] = adapter_->metrics("poison_q2");
+	EXPECT_EQ(metrics.dlq, 0u) << "below the limit, nack must not DLQ";
+	EXPECT_GE(metrics.ready + metrics.delayed, 1u) << "below the limit, nack must requeue";
+}
+
+// TC-SQL-19 (Defect D-07): DLQ retention purge removes only entries at or older than the
+// cutoff (dlq_at <= older_than_ms), leaving newer ones intact.
+TEST_F(SQLiteAdapterTest, PurgeDlqMessagesRespectsRetentionCutoff)
+{
+	auto env = make_envelope("retain_q", R"({"data":"z"})");
+	adapter_->enqueue(env);
+
+	auto result = adapter_->lease_next("retain_q", "w1", 30);
+	ASSERT_TRUE(result.leased);
+	ASSERT_TRUE(result.lease.has_value());
+
+	auto [nok, nerr] = adapter_->nack(*result.lease, "permanent", false);  // -> DLQ, dlq_at ~ now
+	ASSERT_TRUE(nok) << "nack to dlq failed: " << nerr.value_or("unknown");
+
+	auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+		std::chrono::system_clock::now().time_since_epoch()).count();
+
+	// Cutoff in the past: the fresh entry (dlq_at ~ now) is newer -> retained.
+	auto [purged_none, e1] = adapter_->purge_dlq_messages("retain_q", now - 60000);
+	EXPECT_EQ(purged_none, 0);
+	{
+		auto [m, me] = adapter_->metrics("retain_q");
+		EXPECT_EQ(m.dlq, 1u) << "entry newer than cutoff must be retained";
+	}
+
+	// Cutoff in the future: the entry is now older than the cutoff -> purged.
+	auto [purged_one, e2] = adapter_->purge_dlq_messages("retain_q", now + 60000);
+	EXPECT_EQ(purged_one, 1);
+	{
+		auto [m, me] = adapter_->metrics("retain_q");
+		EXPECT_EQ(m.dlq, 0u) << "entry older than cutoff must be purged";
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Direct addressing tests
 // ---------------------------------------------------------------------------

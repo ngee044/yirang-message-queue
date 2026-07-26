@@ -166,7 +166,10 @@ public:
 	virtual auto lease_next(const std::string& queue, const std::string& consumer_id, const int32_t& visibility_timeout_sec)
 		-> LeaseResult = 0;
 	virtual auto ack(const LeaseToken& lease) -> std::tuple<bool, std::optional<std::string>> = 0;
-	virtual auto nack(const LeaseToken& lease, const std::string& reason, const bool& requeue)
+	// retry_limit >= 0 caps explicit requeue: when the message's attempt has reached it, the
+	// nack is routed to DLQ instead of ready, preventing a poison-message loop. -1 disables
+	// the cap (legacy behavior). (Defect D-06)
+	virtual auto nack(const LeaseToken& lease, const std::string& reason, const bool& requeue, int32_t retry_limit = -1)
 		-> std::tuple<bool, std::optional<std::string>> = 0;
 	virtual auto extend_lease(const LeaseToken& lease, const int32_t& visibility_timeout_sec)
 		-> std::tuple<bool, std::optional<std::string>> = 0;
@@ -191,11 +194,23 @@ public:
 	// TTL: purge expired messages (ready/delayed only, not inflight)
 	virtual auto purge_expired_messages(void) -> std::tuple<int32_t, std::optional<std::string>> = 0;
 
+	// DLQ retention: purge DLQ messages whose dlq_at is at or before older_than_ms for a queue.
+	// Non-pure with a no-op default so backends without DLQ-retention support (and test mocks)
+	// remain valid; real backends override it. Returns the number purged. (Defect D-07)
+	virtual auto purge_dlq_messages(const std::string& queue, int64_t older_than_ms)
+		-> std::tuple<int32_t, std::optional<std::string>>
+	{
+		(void)queue;
+		(void)older_than_ms;
+		return { 0, std::nullopt };
+	}
+
 	// Batch operations (default: iterate single operations)
 	virtual auto batch_enqueue(const std::vector<MessageEnvelope>& messages)
 		-> std::tuple<int32_t, std::optional<std::string>>
 	{
 		int32_t success_count = 0;
+		std::optional<std::string> first_error;
 		for (const auto& msg : messages)
 		{
 			auto [ok, error] = enqueue(msg);
@@ -203,8 +218,14 @@ public:
 			{
 				success_count++;
 			}
+			else if (!first_error.has_value())
+			{
+				// Surface the first backend failure instead of silently swallowing it, so
+				// callers can distinguish a failed batch from a fully-published one. (D-21)
+				first_error = error.value_or("enqueue failed");
+			}
 		}
-		return { success_count, std::nullopt };
+		return { success_count, first_error };
 	}
 
 	virtual auto batch_lease_next(const std::string& queue, const std::string& consumer_id,

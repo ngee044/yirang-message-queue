@@ -567,7 +567,7 @@ auto HybridAdapter::ack(const LeaseToken& lease) -> std::tuple<bool, std::option
 	return { true, std::nullopt };
 }
 
-auto HybridAdapter::nack(const LeaseToken& lease, const std::string& reason, const bool& requeue)
+auto HybridAdapter::nack(const LeaseToken& lease, const std::string& reason, const bool& requeue, int32_t retry_limit)
 	-> std::tuple<bool, std::optional<std::string>>
 {
 	std::lock_guard<std::mutex> lock(db_mutex_);
@@ -586,7 +586,7 @@ auto HybridAdapter::nack(const LeaseToken& lease, const std::string& reason, con
 	}
 
 	std::string check_sql = std::format(
-		"SELECT queue FROM {} WHERE message_key = ? AND state = 'inflight' AND (? = '' OR lease_id = ?)",
+		"SELECT queue, attempt FROM {} WHERE message_key = ? AND state = 'inflight' AND (? = '' OR lease_id = ?)",
 		sqlite_config_.message_index_table
 	);
 
@@ -607,8 +607,17 @@ auto HybridAdapter::nack(const LeaseToken& lease, const std::string& reason, con
 	}
 
 	std::string queue = check_stmt->column_text(0);
+	int32_t attempt = check_stmt->column_int(1);
 
-	if (requeue)
+	// Cap explicit requeue: a message that has reached the retry limit goes to DLQ instead of
+	// ready, preventing an infinite nack-requeue loop on a poison message. (Defect D-06)
+	bool effective_requeue = requeue;
+	if (requeue && retry_limit >= 0 && attempt >= retry_limit)
+	{
+		effective_requeue = false;
+	}
+
+	if (effective_requeue)
 	{
 		std::string update_sql = std::format(
 			"UPDATE {} SET state = 'ready', lease_until = NULL, available_at = ? WHERE message_key = ?",
@@ -633,7 +642,7 @@ auto HybridAdapter::nack(const LeaseToken& lease, const std::string& reason, con
 	else
 	{
 		std::string update_sql = std::format(
-			"UPDATE {} SET state = 'dlq', lease_until = NULL WHERE message_key = ?",
+			"UPDATE {} SET state = 'dlq', lease_until = NULL, dlq_reason = ?, dlq_at = ? WHERE message_key = ?",
 			sqlite_config_.message_index_table
 		);
 
@@ -643,7 +652,9 @@ auto HybridAdapter::nack(const LeaseToken& lease, const std::string& reason, con
 			db_.rollback();
 			return { false, update_prep_error };
 		}
-		update_stmt->bind_text(1, lease.message_key);
+		update_stmt->bind_text(1, reason);
+		update_stmt->bind_int64(2, current_time_ms());
+		update_stmt->bind_text(3, lease.message_key);
 
 		if (update_stmt->step() != SQLITE_DONE)
 		{
@@ -1124,7 +1135,7 @@ auto HybridAdapter::move_to_dlq(const std::string& message_key, const std::strin
 	}
 
 	std::string update_idx_sql = std::format(
-		"UPDATE {} SET state = 'dlq', lease_until = NULL WHERE message_key = ?",
+		"UPDATE {} SET state = 'dlq', lease_until = NULL, dlq_reason = ?, dlq_at = ? WHERE message_key = ?",
 		sqlite_config_.message_index_table
 	);
 
@@ -1134,7 +1145,9 @@ auto HybridAdapter::move_to_dlq(const std::string& message_key, const std::strin
 		db_.rollback();
 		return { false, idx_prep_error };
 	}
-	idx_stmt->bind_text(1, message_key);
+	idx_stmt->bind_text(1, reason);
+	idx_stmt->bind_int64(2, current_time_ms());
+	idx_stmt->bind_text(3, message_key);
 
 	if (idx_stmt->step() != SQLITE_DONE)
 	{
@@ -1240,17 +1253,15 @@ auto HybridAdapter::atomic_write(const std::string& target_path, const std::stri
 {
 	auto temp_path = target_path + ".tmp";
 
-	std::ofstream file(temp_path, std::ios::out | std::ios::trunc);
-	if (!file.is_open())
+	// Durable, fail-closed write: abort before rename if the payload temp cannot be fully
+	// written (e.g. ENOSPC), so a partial payload never replaces a valid one. (Defect D-02)
+	auto [write_ok, write_error] = Utilities::write_file_durable(temp_path, content);
+	if (!write_ok)
 	{
-		return { false, std::format("cannot create temp file: {}", temp_path) };
+		std::error_code ec;
+		std::filesystem::remove(temp_path, ec);
+		return { false, write_error };
 	}
-
-	file << content;
-	file.flush();
-	file.close();
-
-	Utilities::fsync_file(temp_path);
 
 	std::error_code ec;
 	std::filesystem::rename(temp_path, target_path, ec);
@@ -1715,7 +1726,6 @@ auto HybridAdapter::check_consistency(const std::string& queue)
 		}
 
 		// Check for stale archives (older than retention period, e.g., 7 days)
-		auto now = current_time_ms();
 		auto retention_ms = static_cast<int64_t>(7 * 24 * 60 * 60 * 1000); // 7 days
 
 		for (const auto& archive_id : archive_files)
@@ -1726,12 +1736,13 @@ auto HybridAdapter::check_consistency(const std::string& queue)
 			auto last_write = std::filesystem::last_write_time(archive_path, ec);
 			if (!ec)
 			{
-				auto file_time = std::chrono::duration_cast<std::chrono::milliseconds>(
-					last_write.time_since_epoch()
+				// Age must be computed with the file clock's own now(): subtracting a
+				// file_clock timestamp from a system_clock one mixes epochs (they differ on
+				// libstdc++) and previously mis-flagged every archive as stale. (Defect D-08)
+				auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+					std::filesystem::file_time_type::clock::now() - last_write
 				).count();
 
-				// Convert to comparable time (approximate since different clocks)
-				auto age_ms = now - file_time;
 				if (age_ms > retention_ms)
 				{
 					ConsistencyIssue issue;
@@ -2028,4 +2039,95 @@ auto HybridAdapter::purge_expired_messages(void) -> std::tuple<int32_t, std::opt
 	}
 
 	return { static_cast<int32_t>(expired_list.size()), std::nullopt };
+}
+
+auto HybridAdapter::purge_dlq_messages(const std::string& queue, int64_t older_than_ms) -> std::tuple<int32_t, std::optional<std::string>>
+{
+	std::lock_guard<std::mutex> lock(db_mutex_);
+
+	if (!is_open_)
+	{
+		return { 0, "adapter not open" };
+	}
+
+	auto [tx_ok, tx_error] = db_.begin_transaction();
+	if (!tx_ok)
+	{
+		return { 0, tx_error };
+	}
+
+	// DLQ entries with a recorded dlq_at at or before the cutoff are past retention. (D-07)
+	std::string select_sql = std::format(
+		"SELECT message_key FROM {} WHERE queue = ? AND state = 'dlq' AND dlq_at > 0 AND dlq_at <= ?",
+		sqlite_config_.message_index_table
+	);
+
+	auto [select_stmt, select_error] = db_.prepare(select_sql);
+	if (!select_stmt)
+	{
+		db_.rollback();
+		return { 0, select_error };
+	}
+	select_stmt->bind_text(1, queue);
+	select_stmt->bind_int64(2, older_than_ms);
+
+	std::vector<std::string> keys;
+	while (select_stmt->step() == SQLITE_ROW)
+	{
+		keys.push_back(select_stmt->column_text(0));
+	}
+
+	if (keys.empty())
+	{
+		db_.rollback();
+		return { 0, std::nullopt };
+	}
+
+	std::string delete_idx_sql = std::format(
+		"DELETE FROM {} WHERE queue = ? AND state = 'dlq' AND dlq_at > 0 AND dlq_at <= ?",
+		sqlite_config_.message_index_table
+	);
+
+	auto [del_stmt, del_error] = db_.prepare(delete_idx_sql);
+	if (!del_stmt)
+	{
+		db_.rollback();
+		return { 0, del_error };
+	}
+	del_stmt->bind_text(1, queue);
+	del_stmt->bind_int64(2, older_than_ms);
+
+	if (del_stmt->step() != SQLITE_DONE)
+	{
+		db_.rollback();
+		return { 0, "failed to delete dlq index rows" };
+	}
+
+	for (const auto& key : keys)
+	{
+		std::string delete_kv_sql = std::format("DELETE FROM {} WHERE key = ?", sqlite_config_.kv_table);
+		auto [kv_stmt, kv_error] = db_.prepare(delete_kv_sql);
+		if (kv_stmt)
+		{
+			kv_stmt->bind_text(1, key);
+			kv_stmt->step();
+		}
+	}
+
+	auto [commit_ok, commit_error] = db_.commit();
+	if (!commit_ok)
+	{
+		db_.rollback();
+		return { 0, commit_error };
+	}
+
+	// Best-effort removal of the DLQ payload files after the DB commit.
+	for (const auto& key : keys)
+	{
+		auto message_id = extract_message_id_from_key(key);
+		std::error_code ec;
+		std::filesystem::remove(build_dlq_path(queue, message_id), ec);
+	}
+
+	return { static_cast<int32_t>(keys.size()), std::nullopt };
 }

@@ -5,6 +5,8 @@
 #include <gtest/gtest.h>
 
 #include <ios>
+#include <fstream>
+#include <iterator>
 #include <memory>
 #include <string>
 #include <tuple>
@@ -80,4 +82,42 @@ TEST_F(FileTest, ReadFromWriteOnlyHandleFails)
 	EXPECT_FALSE(bytes.has_value()) << "read from an out-mode handle must be rejected";
 	EXPECT_TRUE(err.has_value());
 	out.close();
+}
+
+// Defect D-02: write_file_durable must write exact content and, crucially, report a
+// failure instead of silently leaving a partial file (the class of bug where a full-disk
+// write was swallowed as success and a truncated file was promoted over a good one).
+
+TEST_F(FileTest, WriteFileDurableRoundTrip)
+{
+	const auto path = path_for("durable.json");
+	const std::string content = R"({"k":"v","n":42})";
+
+	auto [ok, err] = Utilities::write_file_durable(path, content);
+	ASSERT_TRUE(ok) << (err ? *err : "");
+
+	std::ifstream in(path, std::ios::binary);
+	ASSERT_TRUE(in.is_open());
+	const std::string read_back((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+	EXPECT_EQ(read_back, content);
+}
+
+TEST_F(FileTest, WriteFileDurableReportsFailureInsteadOfSilentSuccess)
+{
+	// Parent directory does not exist, so the write cannot complete. The contract is that
+	// this is REPORTED as a failure rather than swallowed.
+	const auto bad_path = path_for("missing_subdir/durable.json");
+
+	auto [ok, err] = Utilities::write_file_durable(bad_path, "payload");
+	EXPECT_FALSE(ok) << "a write that cannot complete must not report success";
+	EXPECT_TRUE(err.has_value());
+}
+
+TEST_F(FileTest, FsyncFileReturnsFalseForMissingFileTrueForReal)
+{
+	const auto path = path_for("fsync_target.json");
+	EXPECT_FALSE(Utilities::fsync_file(path)) << "fsync of a non-existent file must return false";
+
+	ASSERT_TRUE(std::get<0>(Utilities::write_file_durable(path, "x")));
+	EXPECT_TRUE(Utilities::fsync_file(path)) << "fsync of an existing file must succeed";
 }

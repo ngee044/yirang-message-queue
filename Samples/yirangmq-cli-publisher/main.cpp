@@ -63,8 +63,8 @@ Configuration File (publisher_configuration.json):
   }
 
 Examples:
-  yirangmq-cli-publisher --message '{"temp":36.5}'
-  yirangmq-cli-publisher --message '{"temp":36.5}' --target worker-01
+  yirangmq-cli-publisher --message '{"deviceId":"sensor-01","timestamp":1700000000,"temp":36.5}'
+  yirangmq-cli-publisher --message '{"deviceId":"sensor-01","timestamp":1700000000,"temp":36.5}' --target worker-01
   yirangmq-cli-publisher status --queue telemetry
   yirangmq-cli-publisher health
   yirangmq-cli-publisher metrics

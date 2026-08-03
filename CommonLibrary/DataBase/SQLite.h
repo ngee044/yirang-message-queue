@@ -78,6 +78,11 @@ namespace DataBase
 		auto commit(void) -> std::tuple<bool, std::optional<std::string>>;
 		auto rollback(void) -> std::tuple<bool, std::optional<std::string>>;
 
+		// `CREATE TABLE IF NOT EXISTS` never alters an existing table, so a schema file alone cannot
+		// upgrade a database created by an earlier version. No-op when the column is already there.
+		auto ensure_column(const std::string& table, const std::string& column, const std::string& declaration)
+			-> std::tuple<bool, std::optional<std::string>>;
+
 	private:
 		auto error_message(const std::string& context) const -> std::string;
 

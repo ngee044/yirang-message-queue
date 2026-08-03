@@ -53,11 +53,16 @@ print_usage() {
     echo "Cross-build (embedded):"
     echo "  buildx [platform]  Cross-build runtime image (default linux/arm64; QEMU, slow)"
     echo ""
+    echo "Environment:"
+    echo "  YIRANGMQ_CONSUMER_ID   Consumer id used by consume/ack/nack/extend-lease"
+    echo "                         (default: docker-consumer). A settle is only accepted from the"
+    echo "                         consumer holding the lease, so it must match across commands."
+    echo ""
     echo "Examples:"
     echo "  $0 up                                    # Start service"
     echo "  $0 logs -f                              # Follow logs"
-    echo "  $0 publish telemetry '{\"temp\":25.5}'"
-    echo "  $0 publish telemetry '{\"temp\":25.5}' --target worker-01"
+    echo "  $0 publish telemetry '{\"deviceId\":\"sensor-01\",\"timestamp\":1700000000,\"temp\":25.5}'"
+    echo "  $0 publish telemetry '{\"deviceId\":\"sensor-01\",\"timestamp\":1700000000,\"temp\":25.5}' --target worker-01"
     echo "  $0 consume telemetry"
     echo "  $0 ack msg:telemetry:abc123"
     echo "  $0 nack msg:telemetry:abc123 --reason 'error' --requeue"
@@ -67,6 +72,10 @@ print_usage() {
     echo "  $0 queue-status telemetry"
     echo ""
 }
+
+# A settle (ack/nack/extend-lease) is only accepted from the consumer holding the lease. Passed
+# BEFORE "$@" because ArgumentParser keeps the last occurrence, so a caller's value must win.
+CONSUMER_ID="${YIRANGMQ_CONSUMER_ID:-docker-consumer}"
 
 log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
@@ -78,6 +87,14 @@ log_pass_or_fail() {
         log_error "$1: FAIL (exit ${2:-1})"
         exit "${2:-1}"
     fi
+}
+
+# ctest runs in the container: a build-time RUN layer is cache-hit and passes without running. (D-56)
+run_unit_tests() {
+    docker compose build yirangmq-unit-test
+    local rc=0
+    docker compose run --rm yirangmq-unit-test || rc=$?
+    log_pass_or_fail "Unit tests" "$rc"
 }
 
 # Host-side wrapper round-trip: verifies that `docker-compose.sh publish` passes a JSON
@@ -168,7 +185,8 @@ case "${1:-help}" in
         if [ -z "$MESSAGE" ]; then
             MESSAGE='{"test":true}'
         fi
-        shift 3 2>/dev/null || true
+        # A failed `shift 3` shifts nothing, leaving the subcommand and queue in "$@" as stray args.
+        shift $(( $# >= 3 ? 3 : $# ))
         log_info "Publishing to queue: $QUEUE"
         docker compose exec -T yirangmq /app/yirangmq-cli-publisher --queue "$QUEUE" --message "$MESSAGE" "$@"
         ;;
@@ -189,41 +207,49 @@ case "${1:-help}" in
     # Consumer commands
     consume)
         QUEUE="${2:-telemetry}"
-        CONSUMER_ID="${3:-docker-consumer}"
-        log_info "Consuming from queue: $QUEUE"
-        docker compose exec -T yirangmq /app/yirangmq-cli-consumer consume --queue "$QUEUE" --consumer-id "$CONSUMER_ID"
+        # A failed `shift 2` shifts nothing, leaving the subcommand in "$@".
+        shift $(( $# >= 2 ? 2 : $# ))
+        # Positional form `consume <queue> <consumer-id>` stays supported, but an option must not
+        # be swallowed as the positional id.
+        if [ $# -ge 1 ] && [ "${1#-}" = "$1" ]; then
+            CONSUMER_ID="$1"
+            shift
+        fi
+        log_info "Consuming from queue: $QUEUE (consumer: $CONSUMER_ID)"
+        docker compose exec -T yirangmq /app/yirangmq-cli-consumer consume --queue "$QUEUE" --consumer-id "$CONSUMER_ID" "$@"
         ;;
 
     ack)
         MESSAGE_KEY="${2}"
         if [ -z "$MESSAGE_KEY" ]; then
-            log_error "Usage: $0 ack <message-key>"
+            log_error "Usage: $0 ack <message-key> [--lease-id <id>] [--consumer-id <id>]"
             exit 1
         fi
+        shift 2
         log_info "Acknowledging message: $MESSAGE_KEY"
-        docker compose exec -T yirangmq /app/yirangmq-cli-consumer ack --message-key "$MESSAGE_KEY"
+        docker compose exec -T yirangmq /app/yirangmq-cli-consumer ack --message-key "$MESSAGE_KEY" --consumer-id "$CONSUMER_ID" "$@"
         ;;
 
     nack)
         MESSAGE_KEY="${2}"
         if [ -z "$MESSAGE_KEY" ]; then
-            log_error "Usage: $0 nack <message-key> [--reason 'text'] [--requeue]"
+            log_error "Usage: $0 nack <message-key> [--reason 'text'] [--requeue] [--consumer-id <id>]"
             exit 1
         fi
         shift 2
         log_info "Nacking message: $MESSAGE_KEY"
-        docker compose exec -T yirangmq /app/yirangmq-cli-consumer nack --message-key "$MESSAGE_KEY" "$@"
+        docker compose exec -T yirangmq /app/yirangmq-cli-consumer nack --message-key "$MESSAGE_KEY" --consumer-id "$CONSUMER_ID" "$@"
         ;;
 
     extend-lease)
         MESSAGE_KEY="${2}"
         if [ -z "$MESSAGE_KEY" ]; then
-            log_error "Usage: $0 extend-lease <message-key> [--lease-id <id>] [--visibility <sec>]"
+            log_error "Usage: $0 extend-lease <message-key> [--lease-id <id>] [--visibility <sec>] [--consumer-id <id>]"
             exit 1
         fi
         shift 2
         log_info "Extending lease for message: $MESSAGE_KEY"
-        docker compose exec -T yirangmq /app/yirangmq-cli-consumer extend-lease --message-key "$MESSAGE_KEY" "$@"
+        docker compose exec -T yirangmq /app/yirangmq-cli-consumer extend-lease --message-key "$MESSAGE_KEY" --consumer-id "$CONSUMER_ID" "$@"
         ;;
 
     list-dlq)
@@ -246,12 +272,13 @@ case "${1:-help}" in
     test)
         log_info "Running all tests (unit + integration) in Docker..."
         log_info "Phase 1: Unit tests..."
-        docker compose build yirangmq-unit-test 2>&1
-        log_pass_or_fail "Unit tests" $?
+        run_unit_tests
         log_info "Phase 2: Integration tests..."
-        docker compose build yirangmq-integration-test 2>&1
-        log_pass_or_fail "Integration build" $?
-        docker compose run --rm yirangmq-integration-test
+        docker compose build yirangmq-integration-test
+        INTEGRATION_RC=0
+        # Phase 1 already ran the full ctest suite; without this the integration image repeats it.
+        docker compose run --rm yirangmq-integration-test --integration-only || INTEGRATION_RC=$?
+        log_pass_or_fail "Integration tests" "$INTEGRATION_RC"
         run_wrapper_publish_test
         ;;
 
@@ -261,10 +288,12 @@ case "${1:-help}" in
 
     test-unit)
         log_info "Running unit tests in Docker..."
-        docker compose build yirangmq-unit-test
+        run_unit_tests
         ;;
 
     test-integration)
+        # Without shift the subcommand reached the container and died with "Unknown option". (D-59)
+        shift
         log_info "Running integration tests in Docker..."
         docker compose run --rm yirangmq-integration-test "$@"
         ;;

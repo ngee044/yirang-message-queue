@@ -402,112 +402,25 @@ auto MailboxHandler::request_processing_worker(void) -> void
 
 	while (running_.load())
 	{
-		if (use_folder_watcher_)
+		// One path for both modes: the requests/ rescan is the single source of truth because efsw
+		// reports the client's atomic rename as Moved (not Add) and can drop events. The watcher only
+		// sets rescan_requested_ to wake this loop sooner; polling never sets it. (D-01, D-58)
+		scan_and_enqueue_requests(request_dir);
+		process_pending_requests();
+
+		if (!running_.load())
 		{
-			// The directory rescan is the single source of truth: efsw reports the client's
-			// atomic rename as Moved (not Add) and can drop events, so we scan requests/ at
-			// startup (first iteration) and on every wake, then process. on_file_changed only
-			// sets rescan_requested_ to wake us sooner — it does not enqueue. (D-01)
-			scan_and_enqueue_requests(request_dir);
-			process_pending_requests();
-
-			if (!running_.load())
-			{
-				break;
-			}
-
-			std::unique_lock<std::mutex> lock(pending_mutex_);
-			pending_cv_.wait_for(lock, std::chrono::milliseconds(config_.poll_interval_ms), [this]()
-			{
-				return rescan_requested_ || !running_.load();
-			});
-			rescan_requested_ = false;
+			break;
 		}
-		else
+
+		// Interruptible wait (not sleep_for) so stop()'s notify_all wakes the loop immediately
+		// instead of blocking up to a full interval. (Defect D-31)
+		std::unique_lock<std::mutex> lock(pending_mutex_);
+		pending_cv_.wait_for(lock, std::chrono::milliseconds(config_.poll_interval_ms), [this]()
 		{
-			// Polling mode (fallback)
-			auto files = list_files(request_dir);
-
-			for (const auto& file_path : files)
-			{
-				if (!running_.load())
-				{
-					break;
-				}
-
-				std::lock_guard<std::mutex> lock(processing_mutex_);
-
-				// Move to processing
-				auto [processing_path, move_error] = move_to_processing(file_path);
-				if (move_error.has_value())
-				{
-					Utilities::Logger::handle().write(
-						Utilities::LogTypes::Error,
-						std::format("Failed to move request to processing: {}", move_error.value())
-					);
-					continue;
-				}
-
-				// Read and parse request
-				auto [request_opt, read_error] = read_request_file(processing_path);
-				if (!request_opt.has_value())
-				{
-					Utilities::Logger::handle().write(
-						Utilities::LogTypes::Error,
-						std::format("Failed to read request: {}", read_error.value_or("unknown"))
-					);
-					move_to_dead(processing_path, read_error.value_or("parse error"));
-					continue;
-				}
-
-				auto& request = request_opt.value();
-
-				// Start metrics timing
-				auto start_time = record_request_start();
-
-				// Check deadline
-				auto now = current_time_ms();
-				if (request.deadline_ms > 0 && now > request.deadline_ms)
-				{
-					Utilities::Logger::handle().write(
-						Utilities::LogTypes::Information,
-						std::format("Request {} expired (deadline: {}, now: {})",
-							request.request_id, request.deadline_ms, now)
-					);
-					move_to_dead(processing_path, "deadline exceeded");
-					record_request_end(request.command, false, MailboxErrorCode::TIMEOUT, start_time);
-					continue;
-				}
-
-				// Handle request
-				auto response = handle_request(request);
-
-				// Record metrics
-				record_request_end(request.command, response.ok, response.error_code, start_time);
-
-				// Write response
-				auto [write_ok, write_error] = write_response_file(request.client_id, response);
-				if (!write_ok)
-				{
-					Utilities::Logger::handle().write(
-						Utilities::LogTypes::Error,
-						std::format("Failed to write response for request {}: {}",
-							request.request_id, write_error.value_or("unknown"))
-					);
-				}
-
-				// Delete processed file
-				delete_processed(processing_path);
-			}
-
-			// Interruptible wait (not sleep_for) so stop()'s notify_all wakes the poll loop
-			// immediately instead of blocking up to a full interval. (Defect D-31)
-			std::unique_lock<std::mutex> lock(pending_mutex_);
-			pending_cv_.wait_for(lock, std::chrono::milliseconds(config_.poll_interval_ms), [this]()
-			{
-				return !running_.load();
-			});
-		}
+			return rescan_requested_ || !running_.load();
+		});
+		rescan_requested_ = false;
 	}
 }
 

@@ -48,9 +48,10 @@ FROM builder AS test-runner
 
 WORKDIR /app
 
-# Run unit tests as part of the build verification
-# This stage can be targeted with: docker build --target test-runner
-RUN ctest --test-dir build --output-on-failure
+# ctest runs when the container runs, not while the image builds: a build-time `RUN ctest` layer is
+# a cache hit on an unchanged tree, so the gate reported PASS without executing a single test.
+# --no-tests=error because ctest otherwise exits 0 when nothing matched. (D-56)
+ENTRYPOINT ["ctest", "--test-dir", "build", "--output-on-failure", "--no-tests=error"]
 
 # ============================================================
 # Stage 3: Integration Test Environment

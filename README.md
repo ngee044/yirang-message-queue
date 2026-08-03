@@ -51,7 +51,7 @@ cd yirang-mq/docker
 
 # 테스트
 ./docker-compose.sh health
-./docker-compose.sh publish telemetry '{"sensor":"A1","temp":25.5}'
+./docker-compose.sh publish telemetry '{"deviceId":"A1","timestamp":1700000000,"temp":25.5}'
 ./docker-compose.sh consume telemetry
 ```
 
@@ -67,7 +67,7 @@ cd yirang-mq/docker
 ./build/out/MainMQ
 
 # 터미널 2: 메시지 발행
-./build/out/yirangmq-cli-publisher --message '{"temp":25.5}'
+./build/out/yirangmq-cli-publisher --message '{"deviceId":"sensor-01","timestamp":1700000000,"temp":25.5}'
 
 # 터미널 3: 메시지 소비
 ./build/out/yirangmq-cli-consumer
@@ -146,10 +146,10 @@ ipc/
 
 ```bash
 # 일반 발행 (아무 Consumer나 처리)
-yirangmq-cli-publisher --message '{"temp":36.5}'
+yirangmq-cli-publisher --message '{"deviceId":"sensor-01","timestamp":1700000000,"temp":36.5}'
 
 # Direct Addressing (특정 Consumer만 처리)
-yirangmq-cli-publisher --message '{"temp":36.5}' --target worker-01
+yirangmq-cli-publisher --message '{"deviceId":"sensor-01","timestamp":1700000000,"temp":36.5}' --target worker-01
 ```
 
 | target 옵션 | 동작 |
@@ -199,20 +199,23 @@ cd build/out
 # 헬스 체크
 ./yirangmq-cli-publisher health
 
+# 기본 큐 telemetry 는 스키마가 등록되어 있어 deviceId(문자열)가 필수이고,
+# timestamp 는 있을 경우 숫자여야 한다. 위반 시 ERR_VALIDATION_FAILED 로 거부된다.
+
 # 메시지 발행 (기본 - publish 명령 없이 바로 사용)
-./yirangmq-cli-publisher --message '{"sensor":"temp","value":25.5}'
+./yirangmq-cli-publisher --message '{"deviceId":"sensor-01","timestamp":1700000000,"value":25.5}'
 
 # 큐 지정 발행
-./yirangmq-cli-publisher --queue telemetry --message '{"sensor":"humidity","value":65}'
+./yirangmq-cli-publisher --queue telemetry --message '{"deviceId":"humidity-01","timestamp":1700000000,"value":65}'
 
 # 특정 Consumer에게만 발행 (Direct Addressing)
-./yirangmq-cli-publisher --message '{"alert":"high"}' --target worker-01
+./yirangmq-cli-publisher --message '{"deviceId":"sensor-01","timestamp":1700000000,"alert":"high"}' --target worker-01
 
 # 우선순위 지정 (값이 클수록 높은 우선순위, 기본값 0)
-./yirangmq-cli-publisher --message '{"urgent":true}' --priority 10
+./yirangmq-cli-publisher --message '{"deviceId":"sensor-01","timestamp":1700000000,"urgent":true}' --priority 10
 
 # 지연 발행 (5초 후 ready 상태)
-./yirangmq-cli-publisher --message '{"scheduled":true}' --delay 5000
+./yirangmq-cli-publisher --message '{"deviceId":"sensor-01","timestamp":1700000000,"scheduled":true}' --delay 5000
 
 # 큐 상태 확인
 ./yirangmq-cli-publisher status --queue telemetry
@@ -256,11 +259,16 @@ cd build/out
 #   "message": { ... }
 # }
 
+# ACK/NACK/extend-lease 는 lease 를 보유한 consumer 만 수행할 수 있다(3개 백엔드 공통).
+# consume 때 사용한 것과 동일한 --consumer-id 를 넘겨야 하며, 생략 시
+# consumer_configuration.json 의 consumerId 가 사용된다. --lease-id 를 함께 주면
+# 만료·재리스된 stale 토큰까지 차단된다.
+
 # 처리 성공 → ACK (메시지 삭제)
-./yirangmq-cli-consumer ack --message-key msg:telemetry:ABC123
+./yirangmq-cli-consumer ack --message-key msg:telemetry:ABC123 --lease-id LEASE-XYZ --consumer-id worker-01
 
 # 처리 실패 → NACK (재시도 또는 DLQ)
-./yirangmq-cli-consumer nack --message-key msg:telemetry:ABC123 --reason "DB error" --requeue
+./yirangmq-cli-consumer nack --message-key msg:telemetry:ABC123 --lease-id LEASE-XYZ --consumer-id worker-01 --reason "DB error" --requeue
 ```
 
 ### 6. DLQ (Dead Letter Queue) 테스트
@@ -474,8 +482,8 @@ cd docker
 ./docker-compose.sh status      # 상태 확인
 
 # Publisher 명령
-./docker-compose.sh publish telemetry '{"temp":25.5}'
-./docker-compose.sh publish telemetry '{"temp":25.5}' --target worker-01
+./docker-compose.sh publish telemetry '{"deviceId":"sensor-01","timestamp":1700000000,"temp":25.5}'
+./docker-compose.sh publish telemetry '{"deviceId":"sensor-01","timestamp":1700000000,"temp":25.5}' --target worker-01
 ./docker-compose.sh health
 ./docker-compose.sh metrics
 ./docker-compose.sh queue-status telemetry

@@ -791,13 +791,12 @@ TEST_F(SQLiteAdapterTest, ExtendNonInflightLeaseFails)
 }
 
 // ---------------------------------------------------------------------------
-// TC-SQL-20: 이전 버전 DB(lease_consumer_id 컬럼 없음)는 기동 시 ALTER TABLE 로 보강되어야
-// 하고, 재기동에도 멱등해야 한다. 마이그레이션이 동작하지 않으면 정산 SQL 이 "no such
-// column" 으로 실패한다. (Defect D-55)
+// TC-SQL-20: 컬럼 없는 구버전 DB가 기동 시 ALTER 로 보강되고 재기동에도 멱등해야 한다.
+// 마이그레이션이 없으면 정산 SQL 이 "no such column" 으로 실패한다. (D-55)
 // ---------------------------------------------------------------------------
 TEST_F(SQLiteAdapterTest, LegacySchemaGainsLeaseConsumerColumn)
 {
-	// 정본 스키마에서 해당 컬럼 선언만 제거한 구버전 스키마를 만든다.
+	// 정본 스키마에서 컬럼 선언만 뺀 구버전 스키마를 만든다.
 	auto legacy_dir = std::make_unique<TempDir>("sqlite_legacy_schema");
 	auto legacy_schema = fs::path(legacy_dir->path()) / "legacy_schema.sql";
 
@@ -838,12 +837,11 @@ TEST_F(SQLiteAdapterTest, LegacySchemaGainsLeaseConsumerColumn)
 	auto [acked, ack_error] = legacy_adapter->ack(*leased.lease);
 	EXPECT_TRUE(acked) << "migration did not add the column: " << ack_error.value_or("unknown");
 
-	// 같은 DB 재기동: 컬럼이 이미 있으므로 ALTER 를 재시도하지 않아야 한다.
+	// 재기동 시 ALTER 를 재시도하지 않아야 한다(멱등).
 	legacy_adapter->close();
 	auto [reopened, reopen_error] = legacy_adapter->open(legacy_config);
 	ASSERT_TRUE(reopened) << "migration is not idempotent: " << reopen_error.value_or("unknown");
 
-	// 마이그레이션된 DB에서도 소유권 계약이 성립해야 한다.
 	auto env2 = make_envelope("legacy-q", R"({"v":2})");
 	ASSERT_TRUE(std::get<0>(legacy_adapter->enqueue(env2)));
 

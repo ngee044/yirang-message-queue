@@ -48,11 +48,9 @@ FROM builder AS test-runner
 
 WORKDIR /app
 
-# ctest runs when the container runs, not while the image builds. A build-time `RUN ctest` layer
-# is a cache hit on every rebuild of an unchanged tree, so the gate reported PASS without
-# executing a single test. Run with: docker compose run --rm yirangmq-unit-test
-# --no-tests=error: ctest exits 0 when nothing matched, which would reproduce the very "green with
-# zero tests executed" failure this stage is meant to prevent.
+# ctest runs when the container runs, not while the image builds: a build-time `RUN ctest` layer is
+# a cache hit on an unchanged tree, so the gate reported PASS without executing a single test.
+# --no-tests=error because ctest otherwise exits 0 when nothing matched. (D-56)
 ENTRYPOINT ["ctest", "--test-dir", "build", "--output-on-failure", "--no-tests=error"]
 
 # ============================================================

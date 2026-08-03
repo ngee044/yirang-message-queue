@@ -427,10 +427,8 @@ TEST_P(BackendContractTest, StaleLeaseAckRejected)
 }
 
 // ============================================================
-// TC-CONTRACT-16: Lease ownership fencing must be identical on every backend.
-// The empty-lease_id path is exercised on purpose: that is where the backends used to
-// diverge — SQLite/Hybrid accepted a settle from a foreign consumer while FileSystem
-// rejected it, so the same client code behaved differently per backend. (Defect D-55)
+// TC-CONTRACT-16: Lease ownership fencing, identical on every backend. The empty-lease_id path
+// is where SQLite/Hybrid used to accept a foreign settle while FileSystem rejected it. (D-55)
 // ============================================================
 TEST_P(BackendContractTest, SettleRejectsForeignConsumer)
 {
@@ -440,7 +438,6 @@ TEST_P(BackendContractTest, SettleRejectsForeignConsumer)
 	ASSERT_TRUE(result.leased);
 	ASSERT_TRUE(result.lease.has_value());
 
-	// Correct message key and a genuine lease token, but a different consumer identity.
 	LeaseToken foreign = result.lease.value();
 	foreign.consumer_id = "thief-2";
 
@@ -453,14 +450,12 @@ TEST_P(BackendContractTest, SettleRejectsForeignConsumer)
 	auto [nack_ok, nack_err] = backend_->nack(foreign, "spoofed", true, -1);
 	EXPECT_FALSE(nack_ok) << "nack from a non-owning consumer must be rejected";
 
-	// Dropping the fencing token must not bypass the ownership check.
 	LeaseToken tokenless = foreign;
 	tokenless.lease_id = "";
 
 	auto [tokenless_ok, tokenless_err] = backend_->ack(tokenless);
 	EXPECT_FALSE(tokenless_ok) << "ack without a lease token must still honor ownership";
 
-	// The rightful owner still settles the message.
 	auto [ok, err] = backend_->ack(result.lease.value());
 	EXPECT_TRUE(ok) << (err ? *err : "");
 }

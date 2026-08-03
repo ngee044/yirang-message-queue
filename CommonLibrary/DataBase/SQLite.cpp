@@ -404,8 +404,7 @@ namespace DataBase
 			return { false, "database is not open" };
 		}
 
-		// PRAGMA arguments cannot be bound, so the table name is interpolated. It comes from the
-		// daemon configuration, never from a message payload.
+		// PRAGMA arguments cannot be bound; the table name comes from config, never from a payload.
 		auto [info_statement, info_error] = prepare(std::format("PRAGMA table_info({});", table));
 		if (!info_statement)
 		{
@@ -422,9 +421,8 @@ namespace DataBase
 			}
 		}
 
-		// Only SQLITE_DONE means "the column is genuinely absent". Treating a failed scan as
-		// absent would run ALTER anyway and report the resulting "duplicate column name" instead
-		// of the real cause.
+		// Only SQLITE_DONE means the column is genuinely absent. Treating a failed scan as absent
+		// would run ALTER anyway and report "duplicate column name" instead of the real cause.
 		if (step_result != SQLITE_DONE)
 		{
 			return { false, std::format("cannot read columns of {} (step={})", table, step_result) };

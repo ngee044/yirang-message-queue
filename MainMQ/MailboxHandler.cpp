@@ -402,12 +402,9 @@ auto MailboxHandler::request_processing_worker(void) -> void
 
 	while (running_.load())
 	{
-		// One code path serves both modes. The directory rescan is the single source of truth:
-		// efsw reports the client's atomic rename as Moved (not Add) and can drop events, so the
-		// watcher only sets rescan_requested_ to wake this loop sooner — it never enqueues. (D-01)
-		// In polling mode nothing sets that flag, so the wait simply expires every poll interval.
-		// Keeping a separate polling loop meant peak pending depth and phase timing were only
-		// recorded in event mode, and every fix had to be written twice. (Defect D-58)
+		// One path for both modes: the requests/ rescan is the single source of truth because efsw
+		// reports the client's atomic rename as Moved (not Add) and can drop events. The watcher only
+		// sets rescan_requested_ to wake this loop sooner; polling never sets it. (D-01, D-58)
 		scan_and_enqueue_requests(request_dir);
 		process_pending_requests();
 

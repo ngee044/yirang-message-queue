@@ -160,9 +160,8 @@ auto HybridAdapter::ensure_schema(void) -> std::tuple<bool, std::optional<std::s
 		return { false, std::format("schema execution failed: {}", exec_error.value_or("unknown")) };
 	}
 
-	// Databases created before ownership fencing lack lease_consumer_id; rows left inflight across
-	// the upgrade get an empty owner, so their ack is rejected once and the lease sweep then
-	// redelivers them. (Defect D-55)
+	// Pre-fencing databases lack the column; rows inflight across the upgrade get an empty owner,
+	// so their ack is rejected once and the lease sweep redelivers them. (D-55)
 	auto [migrated, migrate_error] = db_.ensure_column(
 		sqlite_config_.message_index_table, "lease_consumer_id", "TEXT NOT NULL DEFAULT ''"
 	);

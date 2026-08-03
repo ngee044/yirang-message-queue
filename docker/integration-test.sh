@@ -63,8 +63,7 @@ echo ""
 if [[ "$RUN_UNIT" == true ]]; then
     log_section "Phase 1: Unit Tests"
 
-    # Discovered, never hardcoded: a hardcoded list silently drops suites added later. The list
-    # had drifted to 7 entries while the build produced 11, so 4 suites never ran here.
+    # Discovered, never hardcoded: the old 7-entry list silently skipped 4 of the 11 suites.
     TEST_SUITES=()
     while IFS= read -r binary; do
         TEST_SUITES+=("$(basename "$binary")")
@@ -91,8 +90,7 @@ if [[ "$RUN_UNIT" == true ]]; then
         if [[ $SUITE_RC -ne 0 ]]; then
             log_fail "$suite"
         elif echo "$SUITE_OUTPUT" | grep -q '0 tests from 0 test suites ran'; then
-            # A filter that matches nothing exits 0; counting that as a pass turned an empty run
-            # into a green result.
+            # A filter matching nothing exits 0; counting that as a pass turned an empty run green.
             log_warn "$suite: no test matched the filter (skipped)"
             SKIP_COUNT=$((SKIP_COUNT + 1))
         else
@@ -147,9 +145,8 @@ if [[ "$RUN_INTEGRATION" == true ]]; then
             log_fail "IT-03: Queue status — $STATUS"
         fi
 
-        # Only the consumer holding the lease may settle it, so every consume/ack/nack below
-        # presents the same id. Omitting --consumer-id sends consumerId from the config file
-        # instead, which no longer matches the leasing consumer. (Defect D-55 / FR-ACK-07)
+        # Only the lease holder may settle, so consume/ack/nack below share one id. Omitting
+        # --consumer-id would send consumerId from the config file instead. (D-55 / FR-ACK-07)
         CONSUMER_ID=test-worker
 
         # --- Test 4: Consume Message ---
@@ -197,8 +194,7 @@ if [[ "$RUN_INTEGRATION" == true ]]; then
 
         if [[ -n "$MSG_KEY2" ]]; then
             NACK=$(/app/yirangmq-cli-consumer nack --message-key "$MSG_KEY2" --lease-id "$LEASE_ID2" --consumer-id "$CONSUMER_ID" --reason "test failure" --requeue --timeout 10000 2>&1)
-            # Match the success wording only: 'nack' also appears in "Nack failed: ...", so the
-            # previous pattern turned a rejected nack into a pass.
+            # Success wording only: 'nack' also matches "Nack failed: ...".
             if echo "$NACK" | grep -q 'Message nacked'; then
                 log_pass "IT-06: NACK with requeue"
             else

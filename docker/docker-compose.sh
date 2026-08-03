@@ -73,10 +73,8 @@ print_usage() {
     echo ""
 }
 
-# Every backend fences a settle (ack/nack/extend-lease) by the consumer that holds the lease, so
-# these commands must present the same consumer id that `consume` used. Passed BEFORE "$@" on
-# purpose: ArgumentParser keeps the LAST occurrence of an option (ArgumentParser.cpp:248-257), so
-# a caller-supplied --consumer-id must come after ours to win.
+# A settle (ack/nack/extend-lease) is only accepted from the consumer holding the lease. Passed
+# BEFORE "$@" because ArgumentParser keeps the last occurrence, so a caller's value must win.
 CONSUMER_ID="${YIRANGMQ_CONSUMER_ID:-docker-consumer}"
 
 log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
@@ -91,8 +89,7 @@ log_pass_or_fail() {
     fi
 }
 
-# ctest runs inside the container, never as a build-time RUN layer: a cached layer reports success
-# without executing a single test, so the gate used to pass while nothing ran. (D-56)
+# ctest runs in the container: a build-time RUN layer is cache-hit and passes without running. (D-56)
 run_unit_tests() {
     docker compose build yirangmq-unit-test
     local rc=0
@@ -188,8 +185,7 @@ case "${1:-help}" in
         if [ -z "$MESSAGE" ]; then
             MESSAGE='{"test":true}'
         fi
-        # Same reason as `consume`: a failed `shift 3` would forward the subcommand and queue name
-        # to the CLI as stray arguments.
+        # A failed `shift 3` shifts nothing, leaving the subcommand and queue in "$@" as stray args.
         shift $(( $# >= 3 ? 3 : $# ))
         log_info "Publishing to queue: $QUEUE"
         docker compose exec -T yirangmq /app/yirangmq-cli-publisher --queue "$QUEUE" --message "$MESSAGE" "$@"
@@ -211,12 +207,10 @@ case "${1:-help}" in
     # Consumer commands
     consume)
         QUEUE="${2:-telemetry}"
-        # `shift 2` is a no-op that returns non-zero when fewer than 2 positionals exist, which
-        # would leave the subcommand itself in "$@"; shift exactly what is there.
+        # A failed `shift 2` shifts nothing, leaving the subcommand in "$@".
         shift $(( $# >= 2 ? 2 : $# ))
-        # Legacy positional form (`consume <queue> <consumer-id>`) stays supported, but a bare
-        # value must not be confused with an option: `consume telemetry --consumer-id w1` has to
-        # reach the CLI as a flag, not be swallowed as the positional id.
+        # Positional form `consume <queue> <consumer-id>` stays supported, but an option must not
+        # be swallowed as the positional id.
         if [ $# -ge 1 ] && [ "${1#-}" = "$1" ]; then
             CONSUMER_ID="$1"
             shift
@@ -282,8 +276,7 @@ case "${1:-help}" in
         log_info "Phase 2: Integration tests..."
         docker compose build yirangmq-integration-test
         INTEGRATION_RC=0
-        # --integration-only: Phase 1 already ran the full ctest suite, and the integration image
-        # defaults to running the unit binaries too — without this every gate ran them twice.
+        # Phase 1 already ran the full ctest suite; without this the integration image repeats it.
         docker compose run --rm yirangmq-integration-test --integration-only || INTEGRATION_RC=$?
         log_pass_or_fail "Integration tests" "$INTEGRATION_RC"
         run_wrapper_publish_test
@@ -299,8 +292,7 @@ case "${1:-help}" in
         ;;
 
     test-integration)
-        # shift drops the subcommand itself; without it the subcommand was forwarded to the
-        # container and every documented invocation died with "Unknown option". (D-59)
+        # Without shift the subcommand reached the container and died with "Unknown option". (D-59)
         shift
         log_info "Running integration tests in Docker..."
         docker compose run --rm yirangmq-integration-test "$@"

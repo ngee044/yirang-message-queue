@@ -39,9 +39,14 @@ Consume Options:
 
 Ack/Nack Options:
   --message-key <key>   Message key (required)
-  --lease-id <id>       Lease ID
+  --lease-id <id>       Lease ID (blocks a stale or re-leased token)
   --reason <text>       Reason for nack
   --requeue             Requeue message on nack (default: false)
+
+  Only the consumer holding the lease may ack/nack/extend it. Pass the same --consumer-id
+  used for consume; when omitted, consumerId from the configuration file is sent. With no
+  configuration file the id is randomly generated per process, so an explicit --consumer-id
+  is required for a settle to be accepted.
 
 Extend Lease Options:
   --message-key <key>   Message key (required)

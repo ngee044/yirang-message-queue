@@ -806,6 +806,8 @@ TEST_F(MailboxHandlerTest, NackWithRequeue)
 	EXPECT_EQ(calls[0].lease.message_key, "msg:test-q:msg-002");
 	EXPECT_EQ(calls[0].reason, "transient error");
 	EXPECT_TRUE(calls[0].requeue);
+	// Ownership fencing rejects the settle unless this reaches the backend intact. (D-55)
+	EXPECT_EQ(calls[0].lease.consumer_id, "worker-01");
 }
 
 TEST_F(MailboxHandlerTest, NackWithoutRequeue)
@@ -879,6 +881,8 @@ TEST_F(MailboxHandlerTest, ExtendLeaseCommand)
 	EXPECT_EQ(calls[0].lease.lease_id, "lease-004");
 	EXPECT_EQ(calls[0].lease.message_key, "msg:test-q:msg-004");
 	EXPECT_EQ(calls[0].visibility_timeout_sec, 120);
+	// Ownership fencing rejects the settle unless this reaches the backend intact. (D-55)
+	EXPECT_EQ(calls[0].lease.consumer_id, "worker-01");
 }
 
 TEST_F(MailboxHandlerTest, ExtendLeaseMissingMessageKeyReturnsError)

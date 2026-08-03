@@ -427,6 +427,45 @@ TEST_P(BackendContractTest, StaleLeaseAckRejected)
 }
 
 // ============================================================
+// TC-CONTRACT-16: Lease ownership fencing must be identical on every backend.
+// The empty-lease_id path is exercised on purpose: that is where the backends used to
+// diverge — SQLite/Hybrid accepted a settle from a foreign consumer while FileSystem
+// rejected it, so the same client code behaved differently per backend. (Defect D-55)
+// ============================================================
+TEST_P(BackendContractTest, SettleRejectsForeignConsumer)
+{
+	backend_->enqueue(make_envelope("contract-q", R"({"v":1})"));
+
+	auto result = backend_->lease_next("contract-q", "owner-1", 30);
+	ASSERT_TRUE(result.leased);
+	ASSERT_TRUE(result.lease.has_value());
+
+	// Correct message key and a genuine lease token, but a different consumer identity.
+	LeaseToken foreign = result.lease.value();
+	foreign.consumer_id = "thief-2";
+
+	auto [ack_ok, ack_err] = backend_->ack(foreign);
+	EXPECT_FALSE(ack_ok) << "ack from a non-owning consumer must be rejected";
+
+	auto [extend_ok, extend_err] = backend_->extend_lease(foreign, 60);
+	EXPECT_FALSE(extend_ok) << "extend_lease from a non-owning consumer must be rejected";
+
+	auto [nack_ok, nack_err] = backend_->nack(foreign, "spoofed", true, -1);
+	EXPECT_FALSE(nack_ok) << "nack from a non-owning consumer must be rejected";
+
+	// Dropping the fencing token must not bypass the ownership check.
+	LeaseToken tokenless = foreign;
+	tokenless.lease_id = "";
+
+	auto [tokenless_ok, tokenless_err] = backend_->ack(tokenless);
+	EXPECT_FALSE(tokenless_ok) << "ack without a lease token must still honor ownership";
+
+	// The rightful owner still settles the message.
+	auto [ok, err] = backend_->ack(result.lease.value());
+	EXPECT_TRUE(ok) << (err ? *err : "");
+}
+
+// ============================================================
 // Instantiate tests for all 3 backends
 // ============================================================
 INSTANTIATE_TEST_SUITE_P(

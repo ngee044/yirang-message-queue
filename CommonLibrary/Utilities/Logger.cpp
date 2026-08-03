@@ -61,7 +61,17 @@ namespace Utilities
 
 		if (log_root_.empty())
 		{
-			log_root_ = std::format("{}/", std::filesystem::current_path().string());
+			log_root_ = std::filesystem::current_path().string();
+		}
+
+		// write_log() concatenates log_root_ with the file name directly, so a root given without
+		// a trailing separator ("./logs") placed the log beside the directory as
+		// "./logsMainMQ_<date>.log" — outside the mounted log volume in Docker. (Defect D-57)
+		// The directory itself is created on demand by File::open, so nothing is created here:
+		// doing so would leave an empty logs/ behind for every process that never writes a file.
+		if (log_root_.back() != '/' && log_root_.back() != '\\')
+		{
+			log_root_.push_back('/');
 		}
 	}
 

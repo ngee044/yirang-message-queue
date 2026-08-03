@@ -2,6 +2,7 @@
 
 #include <sqlite3.h>
 
+#include <format>
 #include <utility>
 
 namespace DataBase
@@ -393,6 +394,43 @@ namespace DataBase
 		}
 
 		return { true, std::nullopt };
+	}
+
+	auto SQLite::ensure_column(const std::string& table, const std::string& column, const std::string& declaration)
+		-> std::tuple<bool, std::optional<std::string>>
+	{
+		if (handle_ == nullptr)
+		{
+			return { false, "database is not open" };
+		}
+
+		// PRAGMA arguments cannot be bound, so the table name is interpolated. It comes from the
+		// daemon configuration, never from a message payload.
+		auto [info_statement, info_error] = prepare(std::format("PRAGMA table_info({});", table));
+		if (!info_statement)
+		{
+			return { false, info_error };
+		}
+
+		int step_result = SQLITE_OK;
+		while ((step_result = info_statement->step()) == SQLITE_ROW)
+		{
+			// table_info columns: cid(0), name(1), type(2), notnull(3), dflt_value(4), pk(5)
+			if (info_statement->column_text(1) == column)
+			{
+				return { true, std::nullopt };
+			}
+		}
+
+		// Only SQLITE_DONE means "the column is genuinely absent". Treating a failed scan as
+		// absent would run ALTER anyway and report the resulting "duplicate column name" instead
+		// of the real cause.
+		if (step_result != SQLITE_DONE)
+		{
+			return { false, std::format("cannot read columns of {} (step={})", table, step_result) };
+		}
+
+		return execute(std::format("ALTER TABLE {} ADD COLUMN {} {};", table, column, declaration));
 	}
 
 	auto SQLite::query(const std::string& sql) -> std::tuple<std::optional<QueryResult>, std::optional<std::string>>

@@ -63,33 +63,40 @@ echo ""
 if [[ "$RUN_UNIT" == true ]]; then
     log_section "Phase 1: Unit Tests"
 
-    TEST_SUITES=(
-        "TestSQLiteAdapter"
-        "TestFileSystemAdapter"
-        "TestHybridAdapter"
-        "TestQueueManager"
-        "TestMessageValidator"
-        "TestConfigurations"
-        "TestMailboxHandler"
-    )
+    # Discovered, never hardcoded: a hardcoded list silently drops suites added later. The list
+    # had drifted to 7 entries while the build produced 11, so 4 suites never ran here.
+    TEST_SUITES=()
+    while IFS= read -r binary; do
+        TEST_SUITES+=("$(basename "$binary")")
+    done < <(find /app -maxdepth 1 -type f -executable -name 'Test*' | sort)
+
+    if [[ ${#TEST_SUITES[@]} -eq 0 ]]; then
+        log_fail "no unit test binaries found in /app (build or COPY is broken)"
+    fi
+
+    log_info "Discovered ${#TEST_SUITES[@]} unit test suite(s)"
 
     for suite in "${TEST_SUITES[@]}"; do
-        if [[ ! -f "/app/$suite" ]]; then
-            log_warn "Test binary not found: $suite (skipped)"
-            SKIP_COUNT=$((SKIP_COUNT + 1))
-            continue
-        fi
-
         FILTER_ARG=""
         if [[ -n "$GTEST_FILTER" ]]; then
             FILTER_ARG="--gtest_filter=$GTEST_FILTER"
         fi
 
         log_info "Running $suite..."
-        if /app/$suite $FILTER_ARG --gtest_color=yes 2>&1; then
-            log_pass "$suite"
-        else
+        # `set -e` aborts on a failing command substitution, so capture the status inline.
+        SUITE_RC=0
+        SUITE_OUTPUT=$(/app/$suite $FILTER_ARG --gtest_color=no 2>&1) || SUITE_RC=$?
+        echo "$SUITE_OUTPUT"
+
+        if [[ $SUITE_RC -ne 0 ]]; then
             log_fail "$suite"
+        elif echo "$SUITE_OUTPUT" | grep -q '0 tests from 0 test suites ran'; then
+            # A filter that matches nothing exits 0; counting that as a pass turned an empty run
+            # into a green result.
+            log_warn "$suite: no test matched the filter (skipped)"
+            SKIP_COUNT=$((SKIP_COUNT + 1))
+        else
+            log_pass "$suite"
         fi
     done
 fi
@@ -140,10 +147,15 @@ if [[ "$RUN_INTEGRATION" == true ]]; then
             log_fail "IT-03: Queue status — $STATUS"
         fi
 
+        # Only the consumer holding the lease may settle it, so every consume/ack/nack below
+        # presents the same id. Omitting --consumer-id sends consumerId from the config file
+        # instead, which no longer matches the leasing consumer. (Defect D-55 / FR-ACK-07)
+        CONSUMER_ID=test-worker
+
         # --- Test 4: Consume Message ---
         log_info "[IT-04] Consume message..."
         sleep 1
-        if CONSUME=$(/app/yirangmq-cli-consumer consume --queue test-queue --consumer-id test-worker --timeout 10000 2>&1); then
+        if CONSUME=$(/app/yirangmq-cli-consumer consume --queue test-queue --consumer-id "$CONSUMER_ID" --timeout 10000 2>&1); then
             if echo "$CONSUME" | grep -q '"messageKey"\|"message_key"\|"leaseId"\|"lease_id"'; then
                 log_pass "IT-04: Consume message"
                 # Extract message key for ACK test
@@ -162,7 +174,7 @@ if [[ "$RUN_INTEGRATION" == true ]]; then
         # --- Test 5: ACK ---
         if [[ -n "$MSG_KEY" ]]; then
             log_info "[IT-05] ACK message ($MSG_KEY)..."
-            if ACK=$(/app/yirangmq-cli-consumer ack --message-key "$MSG_KEY" --lease-id "$LEASE_ID" --timeout 10000 2>&1) && echo "$ACK" | grep -qi 'acknowledged\|"ok"\|"status"'; then
+            if ACK=$(/app/yirangmq-cli-consumer ack --message-key "$MSG_KEY" --lease-id "$LEASE_ID" --consumer-id "$CONSUMER_ID" --timeout 10000 2>&1) && echo "$ACK" | grep -qi 'acknowledged'; then
                 log_pass "IT-05: ACK message"
             else
                 log_fail "IT-05: ACK message — $ACK"
@@ -176,15 +188,18 @@ if [[ "$RUN_INTEGRATION" == true ]]; then
         log_info "[IT-06] NACK and DLQ flow..."
         /app/yirangmq-cli-publisher --queue test-queue --message '{"test":"nack-flow"}' --timeout 10000 >/dev/null 2>&1
         sleep 2
-        CONSUME2=$(/app/yirangmq-cli-consumer consume --queue test-queue --consumer-id test-worker --timeout 10000 2>&1)
+        CONSUME2=$(/app/yirangmq-cli-consumer consume --queue test-queue --consumer-id "$CONSUMER_ID" --timeout 10000 2>&1)
         MSG_KEY2=$(echo "$CONSUME2" | grep -o '"messageKey"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)
         if [[ -z "$MSG_KEY2" ]]; then
             MSG_KEY2=$(echo "$CONSUME2" | grep -o '"message_key"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)
         fi
+        LEASE_ID2=$(echo "$CONSUME2" | grep -o '"leaseId"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)
 
         if [[ -n "$MSG_KEY2" ]]; then
-            NACK=$(/app/yirangmq-cli-consumer nack --message-key "$MSG_KEY2" --reason "test failure" --requeue --timeout 10000 2>&1)
-            if echo "$NACK" | grep -qi 'nack\|requeue\|acknowledged\|"ok"\|"status"'; then
+            NACK=$(/app/yirangmq-cli-consumer nack --message-key "$MSG_KEY2" --lease-id "$LEASE_ID2" --consumer-id "$CONSUMER_ID" --reason "test failure" --requeue --timeout 10000 2>&1)
+            # Match the success wording only: 'nack' also appears in "Nack failed: ...", so the
+            # previous pattern turned a rejected nack into a pass.
+            if echo "$NACK" | grep -q 'Message nacked'; then
                 log_pass "IT-06: NACK with requeue"
             else
                 log_fail "IT-06: NACK with requeue — $NACK"

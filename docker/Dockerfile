@@ -112,6 +112,10 @@ WORKDIR /app
 COPY --from=builder /app/build/out/MainMQ /app/
 COPY --from=builder /app/build/out/yirangmq-cli-publisher /app/
 COPY --from=builder /app/build/out/yirangmq-cli-consumer /app/
+# 시연용 데모 프로세스. integration-test 스테이지는 :75 에서 out 디렉터리를 통째로 복사하므로
+# 이 줄이 없으면 테스트 이미지에는 있고 runtime 이미지에는 없는 비대칭이 조용히 남는다.
+COPY --from=builder /app/build/out/yirangmq-demo-* /app/
+COPY --from=builder /app/build/out/run-demo.sh /app/
 COPY --from=builder /app/build/out/*.json /app/
 COPY --from=builder /app/MainMQ/sqlite_schema.sql /app/
 

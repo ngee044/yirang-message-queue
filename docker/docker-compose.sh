@@ -41,6 +41,9 @@ print_usage() {
     echo "  list-dlq      List messages in dead letter queue"
     echo "  reprocess     Reprocess a DLQ message"
     echo ""
+    echo "Demo Commands:"
+    echo "  demo      Run the demo scenes (publish -> consume -> lease recovery -> DLQ -> reprocess)"
+    echo ""
     echo "Test Commands:"
     echo "  test            Run all tests (unit + integration + wrapper round-trip)"
     echo "  test-unit       Run unit tests only"
@@ -70,6 +73,8 @@ print_usage() {
     echo "  $0 list-dlq telemetry"
     echo "  $0 reprocess msg:telemetry:abc123"
     echo "  $0 queue-status telemetry"
+    echo "  $0 demo                                 # Run all demo scenes"
+    echo "  $0 demo --act 3                         # Lease expiry + fencing scene only"
     echo ""
 }
 
@@ -266,6 +271,15 @@ case "${1:-help}" in
         fi
         log_info "Reprocessing DLQ message: $MESSAGE_KEY"
         docker compose exec -T yirangmq /app/yirangmq-cli-consumer reprocess --message-key "$MESSAGE_KEY"
+        ;;
+
+    # Demo
+    demo)
+        shift
+        log_info "Running the demo scenes against the running daemon..."
+        # --attach: the compose service already owns /app/ipc, so the demo must not start a
+        # second daemon on the same IPC root.
+        docker compose exec -T yirangmq /app/run-demo.sh --attach --bin-dir /app "$@"
         ;;
 
     # Test commands

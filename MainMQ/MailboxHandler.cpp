@@ -19,6 +19,8 @@
 
 using json = nlohmann::json;
 
+using namespace Utilities;
+
 MailboxHandler::MailboxHandler(
 	std::shared_ptr<BackendAdapter> backend,
 	std::shared_ptr<QueueManager> queue_manager,
@@ -43,8 +45,8 @@ auto MailboxHandler::register_schema(const std::string& queue, const MessageSche
 	auto resolved_schema = schema;
 	validator_.resolve_custom_validators(resolved_schema);
 	validator_.register_schema(queue, resolved_schema);
-	Utilities::Logger::handle().write(
-		Utilities::LogTypes::Information,
+	Logger::handle().write(
+		LogTypes::Information,
 		std::format("Registered message schema '{}' for queue '{}'", schema.name, queue)
 	);
 }
@@ -103,7 +105,7 @@ auto MailboxHandler::start(void) -> std::tuple<bool, std::optional<std::string>>
 	// Setup FolderWatcher if enabled
 	if (use_folder_watcher_)
 	{
-		auto& watcher = Utilities::FolderWatcher::handle();
+		auto& watcher = FolderWatcher::handle();
 		watcher.set_callback([this](const std::string& dir, const std::string& filename, efsw::Action action, const std::string& old_filename)
 		{
 			on_file_changed(dir, filename, action, old_filename);
@@ -112,8 +114,8 @@ auto MailboxHandler::start(void) -> std::tuple<bool, std::optional<std::string>>
 		auto request_dir = build_path(config_.requests_dir);
 		watcher.start({ { request_dir, false } });
 
-		Utilities::Logger::handle().write(
-			Utilities::LogTypes::Information,
+		Logger::handle().write(
+			LogTypes::Information,
 			std::format("FolderWatcher started on: {}", request_dir)
 		);
 	}
@@ -142,8 +144,8 @@ auto MailboxHandler::start(void) -> std::tuple<bool, std::optional<std::string>>
 	);
 	thread_pool_->push(cleanup_job);
 
-	Utilities::Logger::handle().write(
-		Utilities::LogTypes::Information,
+	Logger::handle().write(
+		LogTypes::Information,
 		std::format("MailboxHandler started (root: {}, mode: {})", config_.root, use_folder_watcher_ ? "event-driven" : "polling")
 	);
 
@@ -165,14 +167,14 @@ auto MailboxHandler::stop(void) -> void
 	// Stop and destroy FolderWatcher
 	if (use_folder_watcher_)
 	{
-		Utilities::FolderWatcher::handle().stop();
-		Utilities::FolderWatcher::destroy();
+		FolderWatcher::handle().stop();
+		FolderWatcher::destroy();
 	}
 
 	thread_pool_->stop(true);
 
-	Utilities::Logger::handle().write(
-		Utilities::LogTypes::Information,
+	Logger::handle().write(
+		LogTypes::Information,
 		"MailboxHandler stopped"
 	);
 }
@@ -295,8 +297,8 @@ auto MailboxHandler::process_pending_requests(void) -> void
 		std::error_code ec;
 		if (!std::filesystem::exists(file_path, ec))
 		{
-			Utilities::Logger::handle().write(
-				Utilities::LogTypes::Information,
+			Logger::handle().write(
+				LogTypes::Information,
 				std::format("Request file disappeared before processing: {}", file_path)
 			);
 			continue;
@@ -306,8 +308,8 @@ auto MailboxHandler::process_pending_requests(void) -> void
 		auto [processing_path, move_error] = move_to_processing(file_path);
 		if (move_error.has_value())
 		{
-			Utilities::Logger::handle().write(
-				Utilities::LogTypes::Error,
+			Logger::handle().write(
+				LogTypes::Error,
 				std::format("Failed to move request to processing: {}", move_error.value())
 			);
 			continue;
@@ -318,8 +320,8 @@ auto MailboxHandler::process_pending_requests(void) -> void
 		auto [request_opt, read_error] = read_request_file(processing_path);
 		if (!request_opt.has_value())
 		{
-			Utilities::Logger::handle().write(
-				Utilities::LogTypes::Error,
+			Logger::handle().write(
+				LogTypes::Error,
 				std::format("Failed to read request: {}", read_error.value_or("unknown"))
 			);
 			move_to_dead(processing_path, read_error.value_or("parse error"));
@@ -336,8 +338,8 @@ auto MailboxHandler::process_pending_requests(void) -> void
 		auto now = current_time_ms();
 		if (request.deadline_ms > 0 && now > request.deadline_ms)
 		{
-			Utilities::Logger::handle().write(
-				Utilities::LogTypes::Information,
+			Logger::handle().write(
+				LogTypes::Information,
 				std::format("Request {} expired (deadline: {}, now: {})",
 					request.request_id, request.deadline_ms, now)
 			);
@@ -361,8 +363,8 @@ auto MailboxHandler::process_pending_requests(void) -> void
 
 		if (!write_ok)
 		{
-			Utilities::Logger::handle().write(
-				Utilities::LogTypes::Error,
+			Logger::handle().write(
+				LogTypes::Error,
 				std::format("Failed to write response for request {}: {}",
 					request.request_id, write_error.value_or("unknown"))
 			);
@@ -496,7 +498,7 @@ auto MailboxHandler::atomic_write(const std::string& target_path, const std::str
 
 	// Durable, fail-closed write: abort before rename if the temp cannot be fully written
 	// (e.g. ENOSPC), so a truncated response never replaces a valid one. (Defect D-02)
-	auto [write_ok, write_error] = Utilities::write_file_durable(temp_path, content);
+	auto [write_ok, write_error] = write_file_durable(temp_path, content);
 	if (!write_ok)
 	{
 		std::error_code ec;
@@ -512,7 +514,7 @@ auto MailboxHandler::atomic_write(const std::string& target_path, const std::str
 		return { false, std::format("rename failed: {}", ec.message()) };
 	}
 
-	Utilities::fsync_parent_directory(target_path);
+	fsync_parent_directory(target_path);
 
 	return { true, std::nullopt };
 }
@@ -1113,8 +1115,8 @@ auto MailboxHandler::cleanup_stale_requests(void) -> void
 
 		if (file_age_ms > config_.stale_timeout_ms)
 		{
-			Utilities::Logger::handle().write(
-				Utilities::LogTypes::Information,
+			Logger::handle().write(
+				LogTypes::Information,
 				std::format("Moving stale request to dead: {}", file_path)
 			);
 			move_to_dead(file_path, "stale timeout");
@@ -1201,7 +1203,7 @@ auto MailboxHandler::current_time_ms(void) -> int64_t
 
 auto MailboxHandler::generate_uuid(void) -> std::string
 {
-	return Utilities::Generator::guid();
+	return Generator::guid();
 }
 
 auto MailboxHandler::list_files(const std::string& dir_path) -> std::vector<std::string>

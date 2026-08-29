@@ -6,6 +6,7 @@
 #include <atomic>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 #include <future>
@@ -14,12 +15,16 @@
 
 namespace Thread
 {
+	// 이름을 주지 않은 워커의 제목. ThreadPool::push 는 제목이 이 값일 때만
+	// 우선순위·풀 이름으로 채우고, 호출자가 지은 이름은 그대로 둔다.
+	inline constexpr std::string_view default_worker_title = "ThreadWorker";
+
 	class Job;
 	class JobPool;
 	class ThreadWorker : public std::enable_shared_from_this<ThreadWorker>
 	{
 	public:
-		ThreadWorker(const std::vector<JobPriorities>& priorities, const std::string& worker_title = "ThreadWorker");
+		ThreadWorker(const std::vector<JobPriorities>& priorities, const std::string& worker_title = std::string(default_worker_title));
 		virtual ~ThreadWorker(void);
 
 		auto get_ptr(void) -> std::shared_ptr<ThreadWorker>;

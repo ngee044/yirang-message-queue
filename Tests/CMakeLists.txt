@@ -19,6 +19,7 @@ set(TEST_SOURCES
 	TestFile.cpp
 	TestLogger.cpp
 	TestConverter.cpp
+	TestThreadPool.cpp
 )
 
 foreach(TEST_SOURCE IN LISTS TEST_SOURCES)

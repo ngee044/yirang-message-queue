@@ -59,6 +59,16 @@ namespace Thread
 
 	auto ThreadWorker::notify_one(const JobPriorities& target) -> void
 	{
+		// thread_ / priorities_ 는 stop()·start()·priorities() 가 쓰는 값이다. 과거에는
+		// ThreadPool::stop() 이 풀 mutex_ 를 들고 join 해서 notify_callback -> notify_one 과
+		// 직렬화됐지만, 교착을 없애려 join 을 풀 mutex_ 밖으로 뺀 뒤로는 그 보호가 사라졌다.
+		// 따라서 이 함수가 스스로 워커 mutex_ 를 잡아야 한다.
+		//
+		// 잠금 순서는 ThreadPool::mutex_ -> ThreadWorker::mutex_ -> JobPool::mutex_ 로 일정하다.
+		// (JobPool::push 는 notify_callback 을 부르기 전에 자기 락을 놓고, run() 은 잡 실행 전에
+		//  워커 락을 놓으므로 역방향 간선이 없다.)
+		std::scoped_lock<std::mutex> lock(mutex_);
+
 		if (thread_ == nullptr)
 		{
 			return;
@@ -75,7 +85,6 @@ namespace Thread
 			return;
 		}
 
-		std::scoped_lock<std::mutex> lock(mutex_);
 		condition_.notify_one();
 	}
 
@@ -100,7 +109,12 @@ namespace Thread
 			thread_->join();
 			Logger::handle().write(LogTypes::Sequence, std::format("completed to join for {} to stop", thread_worker_title_));
 		}
-		thread_.reset();
+
+		{
+			// notify_one() 이 mutex_ 아래에서 thread_ 를 읽으므로 소멸도 같은 락 아래에서 한다.
+			std::scoped_lock<std::mutex> lock(mutex_);
+			thread_.reset();
+		}
 
 		return { true, std::nullopt };
 	}

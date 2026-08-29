@@ -18,6 +18,8 @@
 
 using json = nlohmann::json;
 
+using namespace Utilities;
+
 namespace
 {
 	const std::atomic<bool> always_running{ true };
@@ -125,7 +127,7 @@ auto main(int argc, char* argv[]) -> int
 {
 	Demo::enable_line_buffered_stdout();
 
-	Utilities::ArgumentParser args(argc, argv);
+	ArgumentParser args(argc, argv);
 
 	std::string command = "watch";
 	if (argc >= 2)

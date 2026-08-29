@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-using Utilities::Converter;
+using namespace Utilities;
 
 namespace
 {

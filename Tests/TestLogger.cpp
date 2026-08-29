@@ -8,8 +8,7 @@
 #include <thread>
 #include <vector>
 
-using Utilities::Logger;
-using Utilities::LogTypes;
+using namespace Utilities;
 
 // ============================================================
 // Logger::run() concurrency (Logger.cpp:226)

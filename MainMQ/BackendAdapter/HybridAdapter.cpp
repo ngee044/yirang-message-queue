@@ -15,6 +15,8 @@
 
 using json = nlohmann::json;
 
+using namespace Utilities;
+
 namespace
 {
 	auto current_time_ms_helper() -> int64_t
@@ -81,8 +83,8 @@ auto HybridAdapter::open(const BackendConfig& config) -> std::tuple<bool, std::o
 
 	is_open_ = true;
 
-	Utilities::Logger::handle().write(
-		Utilities::LogTypes::Information,
+	Logger::handle().write(
+		LogTypes::Information,
 		std::format("HybridAdapter opened (db: {}, payloads: {})", sqlite_config_.db_path, payload_root_)
 	);
 
@@ -351,7 +353,7 @@ auto HybridAdapter::lease_next(const std::string& queue, const std::string& cons
 
 	auto now = current_time_ms();
 	auto lease_until = now + (static_cast<int64_t>(visibility_timeout_sec) * 1000);
-	auto lease_id = Utilities::Generator::guid();
+	auto lease_id = Generator::guid();
 
 	auto [tx_ok, tx_error] = db_.begin_transaction();
 	if (!tx_ok)
@@ -1269,7 +1271,7 @@ auto HybridAdapter::atomic_write(const std::string& target_path, const std::stri
 
 	// Durable, fail-closed write: abort before rename if the payload temp cannot be fully
 	// written (e.g. ENOSPC), so a partial payload never replaces a valid one. (Defect D-02)
-	auto [write_ok, write_error] = Utilities::write_file_durable(temp_path, content);
+	auto [write_ok, write_error] = write_file_durable(temp_path, content);
 	if (!write_ok)
 	{
 		std::error_code ec;
@@ -1285,7 +1287,7 @@ auto HybridAdapter::atomic_write(const std::string& target_path, const std::stri
 		return { false, std::format("rename failed: {}", ec.message()) };
 	}
 
-	Utilities::fsync_parent_directory(target_path);
+	fsync_parent_directory(target_path);
 
 	return { true, std::nullopt };
 }
@@ -1620,8 +1622,8 @@ auto HybridAdapter::check_consistency(const std::string& queue)
 		auto [indexed_active, idx_error] = get_indexed_message_ids(q, "");
 		if (idx_error.has_value())
 		{
-			Utilities::Logger::handle().write(
-				Utilities::LogTypes::Error,
+			Logger::handle().write(
+				LogTypes::Error,
 				std::format("Failed to get indexed messages for queue {}: {}", q, idx_error.value())
 			);
 			continue;
@@ -1772,8 +1774,8 @@ auto HybridAdapter::check_consistency(const std::string& queue)
 		}
 	}
 
-	Utilities::Logger::handle().write(
-		Utilities::LogTypes::Information,
+	Logger::handle().write(
+		LogTypes::Information,
 		std::format("Consistency check completed: {} orphan payloads, {} missing payloads, {} stale archives",
 			report.orphan_payloads, report.missing_payloads, report.stale_archives)
 	);
@@ -1860,16 +1862,16 @@ auto HybridAdapter::repair_consistency(const ConsistencyReport& report)
 					if (kv_ok || idx_ok)
 					{
 						repaired++;
-						Utilities::Logger::handle().write(
-							Utilities::LogTypes::Information,
+						Logger::handle().write(
+							LogTypes::Information,
 							std::format("Repaired orphan payload: {}", issue.message_key)
 						);
 					}
 				}
 				catch (const json::exception& e)
 				{
-					Utilities::Logger::handle().write(
-						Utilities::LogTypes::Error,
+					Logger::handle().write(
+						LogTypes::Error,
 						std::format("Failed to repair orphan payload {}: {}", issue.message_key, e.what())
 					);
 				}
@@ -1895,8 +1897,8 @@ auto HybridAdapter::repair_consistency(const ConsistencyReport& report)
 				if (stmt->step() == SQLITE_DONE)
 				{
 					repaired++;
-					Utilities::Logger::handle().write(
-						Utilities::LogTypes::Information,
+					Logger::handle().write(
+						LogTypes::Information,
 						std::format("Moved message with missing payload to DLQ: {}", issue.message_key)
 					);
 				}
@@ -1911,8 +1913,8 @@ auto HybridAdapter::repair_consistency(const ConsistencyReport& report)
 			if (std::filesystem::remove(issue.payload_path, ec))
 			{
 				repaired++;
-				Utilities::Logger::handle().write(
-					Utilities::LogTypes::Information,
+				Logger::handle().write(
+					LogTypes::Information,
 					std::format("Deleted stale archive: {}", issue.payload_path)
 				);
 			}
@@ -1943,8 +1945,8 @@ auto HybridAdapter::repair_consistency(const ConsistencyReport& report)
 		}
 	}
 
-	Utilities::Logger::handle().write(
-		Utilities::LogTypes::Information,
+	Logger::handle().write(
+		LogTypes::Information,
 		std::format("Consistency repair completed: {} issues repaired", repaired)
 	);
 

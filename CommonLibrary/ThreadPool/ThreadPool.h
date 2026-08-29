@@ -46,6 +46,9 @@ namespace Thread
 		std::atomic_bool pause_;
 		std::atomic_bool working_;
 		std::mutex mutex_;
+		// 워커 join 직렬화 전용. mutex_ 와 분리해야 잡이 워커 안에서 push 할 때
+		// JobPool::push -> notify_callback 이 mutex_ 를 기다리며 교착하지 않는다.
+		std::mutex stop_mutex_;
 		std::string thread_title_;
 		std::shared_ptr<JobPool> job_pool_;
 		std::vector<std::shared_ptr<ThreadWorker>> thread_workers_;

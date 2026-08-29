@@ -14,6 +14,8 @@
 
 using json = nlohmann::json;
 
+using namespace Utilities;
+
 namespace
 {
 	auto replace_all(std::string& source, const std::string& from, const std::string& to) -> void
@@ -307,7 +309,7 @@ auto SQLiteAdapter::lease_next(const std::string& queue, const std::string& cons
 	int32_t priority = select_stmt->column_int(1);
 	int32_t attempt = select_stmt->column_int(2);
 
-	auto lease_id = Utilities::Generator::guid();
+	auto lease_id = Generator::guid();
 	std::string update_sql = std::format(
 		"UPDATE {} SET state = 'inflight', lease_until = ?, attempt = ?, lease_id = ?, lease_consumer_id = ? WHERE message_key = ?;",
 		sqlite_config_.message_index_table
@@ -1258,7 +1260,7 @@ auto SQLiteAdapter::ensure_schema(void) -> std::tuple<bool, std::optional<std::s
 
 auto SQLiteAdapter::load_schema_sql(void) -> std::tuple<std::optional<std::string>, std::optional<std::string>>
 {
-	Utilities::File source;
+	File source;
 	auto [opened, open_message] = source.open(schema_path_, std::ios::in | std::ios::binary);
 	if (!opened)
 	{
@@ -1272,7 +1274,7 @@ auto SQLiteAdapter::load_schema_sql(void) -> std::tuple<std::optional<std::strin
 		return { std::nullopt, read_message };
 	}
 
-	std::string sql = Utilities::Converter::to_string(data.value());
+	std::string sql = Converter::to_string(data.value());
 	if (sql.empty())
 	{
 		return { std::nullopt, "schema sql is empty" };

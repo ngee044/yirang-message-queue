@@ -15,6 +15,8 @@
 
 using json = nlohmann::json;
 
+using namespace Utilities;
+
 FileSystemAdapter::FileSystemAdapter(void)
 	: is_open_(false)
 {
@@ -42,8 +44,8 @@ auto FileSystemAdapter::open(const BackendConfig& config) -> std::tuple<bool, st
 
 	is_open_ = true;
 
-	Utilities::Logger::handle().write(
-		Utilities::LogTypes::Information,
+	Logger::handle().write(
+		LogTypes::Information,
 		std::format("FileSystemAdapter opened (root: {})", fs_config_.root)
 	);
 
@@ -986,7 +988,7 @@ auto FileSystemAdapter::atomic_write(const std::string& target_path, const std::
 	// Write the temp file durably and verify every step. If the write cannot complete
 	// (e.g. ENOSPC on a full flash), abort WITHOUT renaming: a partial temp must never be
 	// promoted over a valid target. The original file is left untouched. (Defect D-02)
-	auto [write_ok, write_error] = Utilities::write_file_durable(temp_path, content);
+	auto [write_ok, write_error] = write_file_durable(temp_path, content);
 	if (!write_ok)
 	{
 		std::error_code ec;
@@ -1003,7 +1005,7 @@ auto FileSystemAdapter::atomic_write(const std::string& target_path, const std::
 	}
 
 	// Best-effort durability of the rename itself; the new content is already visible.
-	Utilities::fsync_parent_directory(target_path);
+	fsync_parent_directory(target_path);
 
 	return { true, std::nullopt };
 }
@@ -1231,7 +1233,7 @@ auto FileSystemAdapter::current_time_ms(void) -> int64_t
 
 auto FileSystemAdapter::generate_uuid(void) -> std::string
 {
-	return Utilities::Generator::guid();
+	return Generator::guid();
 }
 
 auto FileSystemAdapter::extract_queue_from_key(const std::string& message_key) -> std::string

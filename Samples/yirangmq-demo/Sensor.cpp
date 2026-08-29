@@ -16,6 +16,8 @@
 
 using json = nlohmann::json;
 
+using namespace Utilities;
+
 namespace
 {
 	// sleep_ms 는 중단 플래그를 받는다. 센서는 신호를 다루지 않으므로 항상 참인 상수를 넘긴다.
@@ -52,7 +54,7 @@ auto main(int argc, char* argv[]) -> int
 {
 	Demo::enable_line_buffered_stdout();
 
-	Utilities::ArgumentParser args(argc, argv);
+	ArgumentParser args(argc, argv);
 
 	if (args.to_string("--help").has_value())
 	{

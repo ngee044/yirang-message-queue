@@ -51,7 +51,7 @@ print_usage() {
     echo "  $0 [options]"
     echo ""
     echo "PHASES:"
-    echo "  -u, --unit          단위 테스트만 (ctest, 11개 스위트)"
+    echo "  -u, --unit          단위 테스트만 (ctest, 12개 스위트)"
     echo "  -i, --integration   통합 시나리오만 (IT-01~09 + graceful shutdown)"
     echo "  -m, --demo          시연 장면만 (DS-01~06)"
     echo ""

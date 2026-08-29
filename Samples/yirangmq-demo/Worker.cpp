@@ -19,6 +19,8 @@
 
 using json = nlohmann::json;
 
+using namespace Utilities;
+
 namespace
 {
 	std::atomic<bool> running{ true };
@@ -58,7 +60,7 @@ auto main(int argc, char* argv[]) -> int
 {
 	Demo::enable_line_buffered_stdout();
 
-	Utilities::ArgumentParser args(argc, argv);
+	ArgumentParser args(argc, argv);
 
 	if (args.to_string("--help").has_value())
 	{

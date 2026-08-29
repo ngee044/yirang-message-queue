@@ -69,9 +69,16 @@ namespace Thread
 
 		worker->job_pool(job_pool_);
 		worker->pause(pause_.load());
-		worker->worker_title(std::format("{} ThreadWorker on {}", priority, thread_title_));
 
-		Logger::handle().write(LogTypes::Parameter, std::format("pushed {} ThreadWorker on {}", priority, thread_title_));
+		// 워커 제목은 로그에서 실행 주체를 가리는 유일한 이름이다. 호출자가 지은 이름을
+		// 덮어쓰면 같은 우선순위의 워커가 모두 한 이름이 되어 어느 워커가 멈췄는지 구분할 수 없다.
+		// 이름을 주지 않은 워커만 pool 이 채운다.
+		if (worker->worker_title() == default_worker_title)
+		{
+			worker->worker_title(std::format("{} ThreadWorker on {}", priority, thread_title_));
+		}
+
+		Logger::handle().write(LogTypes::Parameter, std::format("pushed {} {} on {}", priority, worker->worker_title(), thread_title_));
 
 		if (working_.load())
 		{
@@ -219,6 +226,8 @@ namespace Thread
 
 	auto ThreadPool::stop(const bool& stop_immediately) -> std::tuple<bool, std::optional<std::string>>
 	{
+		std::vector<std::shared_ptr<ThreadWorker>> workers;
+
 		{
 			std::scoped_lock<std::mutex> lock(mutex_);
 
@@ -234,7 +243,20 @@ namespace Thread
 				job_pool_->clear();
 			}
 
-			for (auto& worker : thread_workers_)
+			workers = thread_workers_;
+		}
+
+		// 워커 join 은 mutex_ 를 놓고 한다. 잡이 자기 자신을 다시 push 하는 재등록 패턴에서는
+		// 워커 스레드가 JobPool::push -> ThreadPool::notify_callback 안에서 같은 mutex_ 를 기다리는데,
+		// join 하는 쪽이 그 mutex_ 를 들고 있으면 서로를 기다려 교착한다.
+		// (실측: QueueManager sweep 재등록 시 TestQueueManager 40회 중 12회 교착)
+		//
+		// 단, join 자체는 stop_mutex_ 로 직렬화한다. mutex_ 를 놓은 탓에 두 스레드가 동시에
+		// stop() 에 들어오면 같은 std::thread 를 두 번 join 해 abort 할 수 있다.
+		{
+			std::scoped_lock<std::mutex> stop_lock(stop_mutex_);
+
+			for (auto& worker : workers)
 			{
 				if (worker == nullptr)
 				{
@@ -247,9 +269,9 @@ namespace Thread
 					return { false, stop_error };
 				}
 			}
-
-			job_pool_->lock(false);
 		}
+
+		job_pool_->lock(false);
 
 		working_.store(false);
 

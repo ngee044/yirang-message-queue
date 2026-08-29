@@ -11,6 +11,8 @@
 
 using json = nlohmann::json;
 
+using namespace Utilities;
+
 namespace fs = std::filesystem;
 
 // Helper: get the directory containing the test executable
@@ -82,7 +84,7 @@ public:
 		char* argv[] = { exe_buf.data() };
 		int argc = 1;
 
-		Utilities::ArgumentParser args(argc, argv);
+		ArgumentParser args(argc, argv);
 		return std::make_unique<Configurations>(std::move(args));
 	}
 

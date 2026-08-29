@@ -72,6 +72,7 @@ temp/
 
 # Build artifacts
 build/
+build-*/
 dist/
 .cache/
 .env

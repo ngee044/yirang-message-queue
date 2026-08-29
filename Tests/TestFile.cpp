@@ -12,7 +12,7 @@
 #include <tuple>
 #include <vector>
 
-using Utilities::File;
+using namespace Utilities;
 
 namespace
 {
@@ -93,7 +93,7 @@ TEST_F(FileTest, WriteFileDurableRoundTrip)
 	const auto path = path_for("durable.json");
 	const std::string content = R"({"k":"v","n":42})";
 
-	auto [ok, err] = Utilities::write_file_durable(path, content);
+	auto [ok, err] = write_file_durable(path, content);
 	ASSERT_TRUE(ok) << (err ? *err : "");
 
 	std::ifstream in(path, std::ios::binary);
@@ -108,7 +108,7 @@ TEST_F(FileTest, WriteFileDurableReportsFailureInsteadOfSilentSuccess)
 	// this is REPORTED as a failure rather than swallowed.
 	const auto bad_path = path_for("missing_subdir/durable.json");
 
-	auto [ok, err] = Utilities::write_file_durable(bad_path, "payload");
+	auto [ok, err] = write_file_durable(bad_path, "payload");
 	EXPECT_FALSE(ok) << "a write that cannot complete must not report success";
 	EXPECT_TRUE(err.has_value());
 }
@@ -116,8 +116,8 @@ TEST_F(FileTest, WriteFileDurableReportsFailureInsteadOfSilentSuccess)
 TEST_F(FileTest, FsyncFileReturnsFalseForMissingFileTrueForReal)
 {
 	const auto path = path_for("fsync_target.json");
-	EXPECT_FALSE(Utilities::fsync_file(path)) << "fsync of a non-existent file must return false";
+	EXPECT_FALSE(fsync_file(path)) << "fsync of a non-existent file must return false";
 
-	ASSERT_TRUE(std::get<0>(Utilities::write_file_durable(path, "x")));
-	EXPECT_TRUE(Utilities::fsync_file(path)) << "fsync of an existing file must succeed";
+	ASSERT_TRUE(std::get<0>(write_file_durable(path, "x")));
+	EXPECT_TRUE(fsync_file(path)) << "fsync of an existing file must succeed";
 }

@@ -12,6 +12,8 @@
 
 using json = nlohmann::json;
 
+using namespace Utilities;
+
 namespace MailboxIPC
 {
 
@@ -29,13 +31,13 @@ auto atomic_write(const std::string& target_path, const std::string& content) ->
 	// Durable, fail-closed write: on any failure (e.g. ENOSPC) abort before rename so a
 	// partial temp is never promoted over a valid target. (Defect D-02, sibling of the
 	// FileSystemAdapter fix.)
-	auto [write_ok, write_error] = Utilities::write_file_durable(temp_path, content);
+	auto [write_ok, write_error] = write_file_durable(temp_path, content);
 	if (!write_ok)
 	{
 		std::error_code rm_ec;
 		std::filesystem::remove(temp_path, rm_ec);
-		Utilities::Logger::handle().write(
-			Utilities::LogTypes::Error,
+		Logger::handle().write(
+			LogTypes::Error,
 			std::format("Durable write failed: {}", write_error.value_or("unknown"))
 		);
 		return false;
@@ -46,14 +48,14 @@ auto atomic_write(const std::string& target_path, const std::string& content) ->
 	if (ec)
 	{
 		std::filesystem::remove(temp_path, ec);
-		Utilities::Logger::handle().write(
-			Utilities::LogTypes::Error,
+		Logger::handle().write(
+			LogTypes::Error,
 			std::format("Rename failed: {}", ec.message())
 		);
 		return false;
 	}
 
-	Utilities::fsync_parent_directory(target_path);
+	fsync_parent_directory(target_path);
 
 	return true;
 }
@@ -66,7 +68,7 @@ auto send_request(
 	int32_t timeout_ms
 ) -> std::tuple<bool, json>
 {
-	auto request_id = Utilities::Generator::guid();
+	auto request_id = Generator::guid();
 	auto now = current_time_ms();
 	auto deadline = now + timeout_ms;
 

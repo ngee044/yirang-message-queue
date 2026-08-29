@@ -14,6 +14,8 @@
 
 using json = nlohmann::json;
 
+using namespace Utilities;
+
 namespace
 {
 	auto is_valid_queue_name(const std::string& name) -> bool
@@ -144,7 +146,7 @@ namespace
 				return;
 			}
 
-			Utilities::File source;
+			File source;
 			auto [opened, open_error] = source.open(path.string(), std::ios::in | std::ios::binary);
 			if (!opened)
 			{
@@ -163,7 +165,7 @@ namespace
 
 			try
 			{
-				json config = json::parse(Utilities::Converter::to_string(source_data.value()));
+				json config = json::parse(Converter::to_string(source_data.value()));
 
 				// Schema version
 				if (config.contains("schemaVersion") && config["schemaVersion"].is_string())

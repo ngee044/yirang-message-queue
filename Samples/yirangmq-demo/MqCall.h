@@ -11,8 +11,8 @@
 
 namespace Demo
 {
-	// send_request()는 두 단계로 실패한다. 전송/응답 수신이 실패하면 첫 bool이 false이고 이때
-	// json["error"]는 문자열이지만, 명령 자체가 실패하면 첫 bool은 true이고 json["error"]가
+	// send_request()는 두 단계로 실패한다. 전송/응답 수신이 실패하면 std::unexpected(오류 문자열)이고,
+	// 명령 자체가 실패하면 성공 값 json의 ok가 false이며 json["error"]가
 	// {code, message} 객체다. 두 경로를 호출부마다 구분하지 않도록 하나의 결과로 정규화한다.
 	struct CallResult
 	{

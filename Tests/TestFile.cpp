@@ -4,12 +4,12 @@
 
 #include <gtest/gtest.h>
 
+#include <expected>
 #include <ios>
 #include <fstream>
 #include <iterator>
 #include <memory>
 #include <string>
-#include <tuple>
 #include <vector>
 
 using namespace Utilities;
@@ -37,18 +37,18 @@ TEST_F(FileTest, WriteThenReadRoundTrip)
 	const auto path = path_for("roundtrip.bin");
 
 	File out;
-	auto [open_ok, open_err] = out.open(path, std::ios::out | std::ios::binary | std::ios::trunc);
-	ASSERT_TRUE(open_ok) << (open_err ? *open_err : "");
-	auto [write_ok, write_err] = out.write_bytes(data);
-	EXPECT_TRUE(write_ok) << (write_err ? *write_err : "");
+	auto open_result = out.open(path, std::ios::out | std::ios::binary | std::ios::trunc);
+	ASSERT_TRUE(open_result.has_value()) << (open_result ? "" : open_result.error());
+	auto write_result = out.write_bytes(data);
+	EXPECT_TRUE(write_result.has_value()) << (write_result ? "" : write_result.error());
 	out.close();
 
 	File in;
-	auto [in_ok, in_err] = in.open(path, std::ios::in | std::ios::binary);
-	ASSERT_TRUE(in_ok) << (in_err ? *in_err : "");
-	auto [bytes, read_err] = in.read_bytes();
-	ASSERT_TRUE(bytes.has_value()) << (read_err ? *read_err : "");
-	EXPECT_EQ(bytes.value(), data);
+	auto in_result = in.open(path, std::ios::in | std::ios::binary);
+	ASSERT_TRUE(in_result.has_value()) << (in_result ? "" : in_result.error());
+	auto read_result = in.read_bytes();
+	ASSERT_TRUE(read_result.has_value()) << (read_result ? "" : read_result.error());
+	EXPECT_EQ(read_result.value(), data);
 	in.close();
 }
 
@@ -59,16 +59,15 @@ TEST_F(FileTest, WriteToReadOnlyHandleFails)
 	const auto path = path_for("readonly.bin");
 	{
 		File seed;
-		ASSERT_TRUE(std::get<0>(seed.open(path, std::ios::out | std::ios::binary | std::ios::trunc)));
+		ASSERT_TRUE(seed.open(path, std::ios::out | std::ios::binary | std::ios::trunc).has_value());
 		seed.write_bytes(std::vector<uint8_t>{ 1 });
 		seed.close();
 	}
 
 	File in;
-	ASSERT_TRUE(std::get<0>(in.open(path, std::ios::in | std::ios::binary)));
-	auto [ok, err] = in.write_bytes(std::vector<uint8_t>{ 2, 3 });
-	EXPECT_FALSE(ok) << "write to an in-mode handle must be rejected";
-	EXPECT_TRUE(err.has_value());
+	ASSERT_TRUE(in.open(path, std::ios::in | std::ios::binary).has_value());
+	auto write_result = in.write_bytes(std::vector<uint8_t>{ 2, 3 });
+	EXPECT_FALSE(write_result.has_value()) << "write to an in-mode handle must be rejected";
 	in.close();
 }
 
@@ -77,10 +76,9 @@ TEST_F(FileTest, ReadFromWriteOnlyHandleFails)
 	const auto path = path_for("writeonly.bin");
 
 	File out;
-	ASSERT_TRUE(std::get<0>(out.open(path, std::ios::out | std::ios::binary | std::ios::trunc)));
-	auto [bytes, err] = out.read_bytes();
-	EXPECT_FALSE(bytes.has_value()) << "read from an out-mode handle must be rejected";
-	EXPECT_TRUE(err.has_value());
+	ASSERT_TRUE(out.open(path, std::ios::out | std::ios::binary | std::ios::trunc).has_value());
+	auto read_result = out.read_bytes();
+	EXPECT_FALSE(read_result.has_value()) << "read from an out-mode handle must be rejected";
 	out.close();
 }
 
@@ -93,8 +91,8 @@ TEST_F(FileTest, WriteFileDurableRoundTrip)
 	const auto path = path_for("durable.json");
 	const std::string content = R"({"k":"v","n":42})";
 
-	auto [ok, err] = write_file_durable(path, content);
-	ASSERT_TRUE(ok) << (err ? *err : "");
+	auto write_result = write_file_durable(path, content);
+	ASSERT_TRUE(write_result.has_value()) << (write_result ? "" : write_result.error());
 
 	std::ifstream in(path, std::ios::binary);
 	ASSERT_TRUE(in.is_open());
@@ -108,9 +106,8 @@ TEST_F(FileTest, WriteFileDurableReportsFailureInsteadOfSilentSuccess)
 	// this is REPORTED as a failure rather than swallowed.
 	const auto bad_path = path_for("missing_subdir/durable.json");
 
-	auto [ok, err] = write_file_durable(bad_path, "payload");
-	EXPECT_FALSE(ok) << "a write that cannot complete must not report success";
-	EXPECT_TRUE(err.has_value());
+	auto write_result = write_file_durable(bad_path, "payload");
+	EXPECT_FALSE(write_result.has_value()) << "a write that cannot complete must not report success";
 }
 
 TEST_F(FileTest, FsyncFileReturnsFalseForMissingFileTrueForReal)
@@ -118,6 +115,6 @@ TEST_F(FileTest, FsyncFileReturnsFalseForMissingFileTrueForReal)
 	const auto path = path_for("fsync_target.json");
 	EXPECT_FALSE(fsync_file(path)) << "fsync of a non-existent file must return false";
 
-	ASSERT_TRUE(std::get<0>(write_file_durable(path, "x")));
+	ASSERT_TRUE(write_file_durable(path, "x").has_value());
 	EXPECT_TRUE(fsync_file(path)) << "fsync of an existing file must succeed";
 }

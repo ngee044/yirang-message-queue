@@ -6,6 +6,7 @@
 #include "JobPool.h"
 #include "Logger.h"
 
+#include <expected>
 #include <format>
 #include <filesystem>
 #include <optional>
@@ -29,7 +30,7 @@ namespace Thread
 	}
 
 	Job::Job(const JobPriorities& priority,
-			 const std::function<std::tuple<bool, std::optional<std::string>>(void)>& callback,
+			 const std::function<std::expected<void, std::string>(void)>& callback,
 			 const std::string& title,
 			 const bool& use_time_stamp)
 		: title_(title), priority_(priority), callback1_(callback), callback2_(nullptr), callback3_(nullptr), callback4_(nullptr), use_time_stamp_(use_time_stamp)
@@ -38,7 +39,7 @@ namespace Thread
 
 	Job::Job(const JobPriorities& priority,
 			 const bool& condition,
-			 const std::function<std::tuple<bool, std::optional<std::string>>(const bool&)>& callback,
+			 const std::function<std::expected<void, std::string>(const bool&)>& callback,
 			 const std::string& title,
 			 const bool& use_time_stamp)
 		: title_(title)
@@ -54,7 +55,7 @@ namespace Thread
 
 	Job::Job(const JobPriorities& priority,
 			 const int32_t& condition,
-			 const std::function<std::tuple<bool, std::optional<std::string>>(const int&)>& callback,
+			 const std::function<std::expected<void, std::string>(const int&)>& callback,
 			 const std::string& title,
 			 const bool& use_time_stamp)
 		: title_(title), priority_(priority), callback1_(nullptr), callback2_(nullptr), callback3_(callback), callback4_(nullptr), use_time_stamp_(use_time_stamp)
@@ -70,7 +71,7 @@ namespace Thread
 
 	Job::Job(const JobPriorities& priority,
 			 const std::vector<uint8_t>& data,
-			 const std::function<std::tuple<bool, std::optional<std::string>>(const std::vector<uint8_t>&)>& callback,
+			 const std::function<std::expected<void, std::string>(const std::vector<uint8_t>&)>& callback,
 			 const std::string& title,
 			 const bool& use_time_stamp)
 		: title_(title)
@@ -96,23 +97,22 @@ namespace Thread
 
 	auto Job::data(const std::vector<uint8_t>& data_array) -> void { data_ = data_array; }
 
-	auto Job::work(void) -> std::tuple<bool, std::optional<std::string>>
+	auto Job::work(void) -> std::expected<void, std::string>
 	{
 		auto start_time_flag = Logger::handle().chrono_start();
 
 		load();
 
-		std::tuple<bool, std::optional<std::string>> result;
+		std::expected<void, std::string> result;
 		if (callback1_)
 		{
 			auto result = callback_safe_caller(callback1_);
-			const auto& [result_condition, error_message] = result;
 			destroy();
 
-			if (result_condition)
+			if (result)
 			{
 				Logger::handle().write(
-					LogTypes::Debug, std::format("completed work on {} [ {} ] with callback of 'bool(void)' : {}", title_, priority_string(priority_), result_condition),
+					LogTypes::Debug, std::format("completed work on {} [ {} ] with callback of 'bool(void)' : {}", title_, priority_string(priority_), result.has_value()),
 					(use_time_stamp_ ? std::optional{ start_time_flag } : std::nullopt));
 			}
 
@@ -123,14 +123,13 @@ namespace Thread
 		{
 			uint8_t condition = data_[0];
 
-			result = callback_safe_caller([&, condition]() -> std::tuple<bool, std::optional<std::string>> { return callback2_((condition == 1) ? true : false); });
-			const auto& [result_condition, error_message] = result;
+			result = callback_safe_caller([&, condition]() -> std::expected<void, std::string> { return callback2_((condition == 1) ? true : false); });
 			destroy();
 
-			if (result_condition)
+			if (result)
 			{
 				Logger::handle().write(
-					LogTypes::Debug, std::format("completed work on {} [ {} ] with callback of 'bool(bool)' : {}", title_, priority_string(priority_), result_condition),
+					LogTypes::Debug, std::format("completed work on {} [ {} ] with callback of 'bool(bool)' : {}", title_, priority_string(priority_), result.has_value()),
 					(use_time_stamp_ ? std::optional{ start_time_flag } : std::nullopt));
 			}
 
@@ -142,15 +141,14 @@ namespace Thread
 			int value;
 			std::memcpy(&value, data_.data(), sizeof(value));
 
-			result = callback_safe_caller([&, value]() -> std::tuple<bool, std::optional<std::string>> { return callback3_(value); });
-			const auto& [result_condition, error_message] = result;
+			result = callback_safe_caller([&, value]() -> std::expected<void, std::string> { return callback3_(value); });
 			destroy();
 
-			if (result_condition)
+			if (result)
 			{
 				Logger::handle().write(
 					LogTypes::Debug,
-					std::format("completed work on {} [ {} ] with callback of 'bool(const int&)' : {}", title_, priority_string(priority_), result_condition),
+					std::format("completed work on {} [ {} ] with callback of 'bool(const int&)' : {}", title_, priority_string(priority_), result.has_value()),
 					(use_time_stamp_ ? std::optional{ start_time_flag } : std::nullopt));
 			}
 
@@ -159,26 +157,24 @@ namespace Thread
 
 		if (callback4_)
 		{
-			result = callback_safe_caller([&]() -> std::tuple<bool, std::optional<std::string>> { return callback4_(data_); });
-			const auto& [result_condition, error_message] = result;
+			result = callback_safe_caller([&]() -> std::expected<void, std::string> { return callback4_(data_); });
 			destroy();
 
-			if (result_condition)
+			if (result)
 			{
 				Logger::handle().write(LogTypes::Debug,
 									   std::format("completed work on {} [ {} ] with callback of 'bool(const std::vector<uint8_t>&)' : {}", title_,
-												   priority_string(priority_), result_condition),
+												   priority_string(priority_), result.has_value()),
 									   (use_time_stamp_ ? std::optional{ start_time_flag } : std::nullopt));
 			}
 
 			return result;
 		}
 
-		result = callback_safe_caller([&]() -> std::tuple<bool, std::optional<std::string>> { return working(); });
-		const auto& [result_condition, error_message] = result;
+		result = callback_safe_caller([&]() -> std::expected<void, std::string> { return working(); });
 		destroy();
 
-		Logger::handle().write(LogTypes::Debug, std::format("completed work on {} [ {} ] : {}", title_, priority_string(priority_), result_condition),
+		Logger::handle().write(LogTypes::Debug, std::format("completed work on {} [ {} ] : {}", title_, priority_string(priority_), result.has_value()),
 							   (use_time_stamp_ ? std::optional{ start_time_flag } : std::nullopt));
 
 		return result;
@@ -257,10 +253,10 @@ namespace Thread
 
 		File source;
 		source.open(temporary_file_, std::ios::in | std::ios::binary);
-		const auto [source_data, message] = source.read_bytes();
+		const auto source_data = source.read_bytes();
 		source.close();
 
-		if (source_data == std::nullopt)
+		if (!source_data)
 		{
 			data_.clear();
 			return;
@@ -275,12 +271,12 @@ namespace Thread
 
 	auto Job::get_job_pool(void) -> std::shared_ptr<JobPool> { return job_pool_.lock(); }
 
-	auto Job::working(void) -> std::tuple<bool, std::optional<std::string>>
+	auto Job::working(void) -> std::expected<void, std::string>
 	{
-		return { false, std::format("cannot complete {}::working because it does not implemented", title_) };
+		return std::unexpected(std::format("cannot complete {}::working because it does not implemented", title_));
 	}
 
-	auto Job::callback_safe_caller(const std::function<std::tuple<bool, std::optional<std::string>>()>& func) -> std::tuple<bool, std::optional<std::string>>
+	auto Job::callback_safe_caller(const std::function<std::expected<void, std::string>()>& func) -> std::expected<void, std::string>
 	{
 		try
 		{
@@ -288,19 +284,19 @@ namespace Thread
 		}
 		catch (const std::overflow_error& message)
 		{
-			return { false, std::format("cannot complete {} [ {} ] on {} : {},\n{}", title_, priority_string(priority_), "Job", message.what(), to_json()) };
+			return std::unexpected(std::format("cannot complete {} [ {} ] on {} : {},\n{}", title_, priority_string(priority_), "Job", message.what(), to_json()));
 		}
 		catch (const std::runtime_error& message)
 		{
-			return { false, std::format("cannot complete {} [ {} ] on {} : {},\n{}", title_, priority_string(priority_), "Job", message.what(), to_json()) };
+			return std::unexpected(std::format("cannot complete {} [ {} ] on {} : {},\n{}", title_, priority_string(priority_), "Job", message.what(), to_json()));
 		}
 		catch (const std::exception& message)
 		{
-			return { false, std::format("cannot complete {} [ {} ] on {} : {},\n{}", title_, priority_string(priority_), "Job", message.what(), to_json()) };
+			return std::unexpected(std::format("cannot complete {} [ {} ] on {} : {},\n{}", title_, priority_string(priority_), "Job", message.what(), to_json()));
 		}
 		catch (...)
 		{
-			return { false, std::format("cannot complete {} [ {} ] on {} : unexpected error,\n{}", title_, priority_string(priority_), "Job", to_json()) };
+			return std::unexpected(std::format("cannot complete {} [ {} ] on {} : unexpected error,\n{}", title_, priority_string(priority_), "Job", to_json()));
 		}
 	}
 } // namespace Thread

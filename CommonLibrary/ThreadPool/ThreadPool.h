@@ -3,10 +3,10 @@
 #include "JobPriorities.h"
 
 #include <atomic>
+#include <expected>
 #include <future>
 #include <memory>
 #include <mutex>
-#include <optional>
 #include <vector>
 
 namespace Thread
@@ -23,9 +23,9 @@ namespace Thread
 		auto get_ptr(void) -> std::shared_ptr<ThreadPool>;
 
 		auto uncompleted_jobs(const std::string& backup_folder) -> std::vector<std::vector<uint8_t>>;
-		auto push(std::shared_ptr<Job> job) -> std::tuple<bool, std::optional<std::string>>;
+		auto push(std::shared_ptr<Job> job) -> std::expected<void, std::string>;
 		auto push(std::shared_ptr<ThreadWorker> worker) -> void;
-		auto remove_workers(const JobPriorities& priority) -> std::tuple<size_t, std::optional<std::string>>;
+		auto remove_workers(const JobPriorities& priority) -> std::expected<size_t, std::string>;
 
 		auto lock(const bool& lock_condition) -> void;
 		auto lock(void) -> bool;
@@ -33,9 +33,9 @@ namespace Thread
 		auto thread_title(const std::string& title) -> void;
 		auto thread_title(void) -> const std::string;
 
-		auto start(void) -> std::tuple<bool, std::optional<std::string>>;
+		auto start(void) -> std::expected<void, std::string>;
 		auto pause(const bool& pause) -> void;
-		auto stop(const bool& stop_immediately = false) -> std::tuple<bool, std::optional<std::string>>;
+		auto stop(const bool& stop_immediately = false) -> std::expected<void, std::string>;
 
 		auto job_pool(void) -> std::shared_ptr<JobPool>;
 

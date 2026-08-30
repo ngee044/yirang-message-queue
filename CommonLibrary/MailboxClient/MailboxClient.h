@@ -3,8 +3,8 @@
 #include <nlohmann/json.hpp>
 
 #include <cstdint>
+#include <expected>
 #include <string>
-#include <tuple>
 
 namespace MailboxIPC
 {
@@ -23,7 +23,7 @@ auto send_request(
 	const std::string& command,
 	const nlohmann::json& payload,
 	int32_t timeout_ms
-) -> std::tuple<bool, nlohmann::json>;
+) -> std::expected<nlohmann::json, std::string>;
 
 auto atomic_write(const std::string& target_path, const std::string& content) -> bool;
 

@@ -147,25 +147,25 @@ namespace
 			}
 
 			File source;
-			auto [opened, open_error] = source.open(path.string(), std::ios::in | std::ios::binary);
-			if (!opened)
+			auto open_result = source.open(path.string(), std::ios::in | std::ios::binary);
+			if (!open_result)
 			{
-				Logger::handle().write(LogTypes::Error, open_error.value_or("Failed to open configuration file"));
+				Logger::handle().write(LogTypes::Error, open_result.error());
 				return;
 			}
 
-			auto [source_data, read_error] = source.read_bytes();
+			auto read_result = source.read_bytes();
 			source.close();
 
-			if (source_data == std::nullopt)
+			if (!read_result)
 			{
-				Logger::handle().write(LogTypes::Error, read_error.value_or("Failed to read configuration file"));
+				Logger::handle().write(LogTypes::Error, read_result.error());
 				return;
 			}
 
 			try
 			{
-				json config = json::parse(Converter::to_string(source_data.value()));
+				json config = json::parse(Converter::to_string(read_result.value()));
 
 				// Schema version
 				if (config.contains("schemaVersion") && config["schemaVersion"].is_string())

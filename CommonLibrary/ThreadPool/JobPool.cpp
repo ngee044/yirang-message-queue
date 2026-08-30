@@ -5,6 +5,7 @@
 #include "Job.h"
 #include "Logger.h"
 
+#include <expected>
 #include <format>
 
 #include <filesystem>
@@ -91,7 +92,7 @@ namespace Thread
 
 			File source;
 			source.open(iterator->path().string(), std::ios::in | std::ios::binary, std::locale(""));
-			const auto [source_data, message] = source.read_bytes();
+			const auto source_data = source.read_bytes();
 			source.close();
 
 			std::error_code ec;
@@ -101,7 +102,7 @@ namespace Thread
 				Logger::handle().write(LogTypes::Error, std::format("cannot destroy a file : {} => {}", iterator->path().string(), ec.message()));
 			}
 
-			if (source_data == std::nullopt)
+			if (!source_data)
 			{
 				continue;
 			}
@@ -112,16 +113,16 @@ namespace Thread
 		return result;
 	}
 
-	auto JobPool::push(std::shared_ptr<Job> job) -> std::tuple<bool, std::optional<std::string>>
+	auto JobPool::push(std::shared_ptr<Job> job) -> std::expected<void, std::string>
 	{
 		if (job == nullptr)
 		{
-			return { false, "cannot push empty job" };
+			return std::unexpected("cannot push empty job");
 		}
 
 		if (lock_condition_.load())
 		{
-			return { false, "the system is locked and new tasks cannot be created" };
+			return std::unexpected("the system is locked and new tasks cannot be created");
 		}
 
 		std::unique_lock<std::mutex> lock(mutex_);
@@ -135,7 +136,7 @@ namespace Thread
 		if (priority == JobPriorities::Low && qsize >= MAX_QUEUE_LOW)
 		{
 			lock.unlock();
-			return { false, "backpressure: low-priority queue is full" };
+			return std::unexpected("backpressure: low-priority queue is full");
 		}
 
 		if (iter != job_queues_.end())
@@ -158,7 +159,7 @@ namespace Thread
 			notify_callback_(priority);
 		}
 
-		return { true, std::nullopt };
+		return {};
 	}
 
 	auto JobPool::pop(const std::vector<JobPriorities>& priorities) -> std::shared_ptr<Job>

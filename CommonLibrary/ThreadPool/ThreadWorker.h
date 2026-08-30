@@ -2,7 +2,6 @@
 
 #include "JobPriorities.h"
 
-#include <tuple>
 #include <atomic>
 #include <memory>
 #include <string>
@@ -10,7 +9,7 @@
 #include <thread>
 #include <vector>
 #include <future>
-#include <optional>
+#include <expected>
 #include <condition_variable>
 
 namespace Thread
@@ -29,10 +28,10 @@ namespace Thread
 
 		auto get_ptr(void) -> std::shared_ptr<ThreadWorker>;
 
-		auto start(void) -> std::tuple<bool, std::optional<std::string>>;
+		auto start(void) -> std::expected<void, std::string>;
 		auto pause(const bool& pause) -> void;
 		auto notify_one(const JobPriorities& target) -> void;
-		auto stop(void) -> std::tuple<bool, std::optional<std::string>>;
+		auto stop(void) -> std::expected<void, std::string>;
 
 		auto job_pool(std::shared_ptr<JobPool> pool) -> void;
 

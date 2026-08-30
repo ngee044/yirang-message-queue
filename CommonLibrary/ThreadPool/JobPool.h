@@ -5,10 +5,10 @@
 #include <map>
 #include <deque>
 #include <atomic>
+#include <expected>
 #include <functional>
 #include <memory>
 #include <mutex>
-#include <optional>
 #include <string>
 #include <vector>
 
@@ -27,7 +27,7 @@ namespace Thread
 		auto clear(const JobPriorities& priority) -> void;
 		auto uncompleted_jobs(const std::string& backup_folder) -> std::vector<std::vector<uint8_t>>;
 
-		auto push(std::shared_ptr<Job> job) -> std::tuple<bool, std::optional<std::string>>;
+		auto push(std::shared_ptr<Job> job) -> std::expected<void, std::string>;
 		auto pop(const std::vector<JobPriorities>& priorities) -> std::shared_ptr<Job>;
 
 		auto notify_callback(const std::function<void(const JobPriorities&)>& callback) -> void;

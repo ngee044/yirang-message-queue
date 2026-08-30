@@ -7,12 +7,11 @@
 
 #include <atomic>
 #include <chrono>
+#include <expected>
 #include <functional>
 #include <memory>
-#include <optional>
 #include <string>
 #include <thread>
-#include <tuple>
 #include <vector>
 
 // 같은 우선순위의 워커를 로그에서 구분하려면 push() 가 호출자가 지은 이름을 지워서는 안 된다.
@@ -73,7 +72,7 @@ TEST_P(ThreadPoolRepushTest, StopDoesNotDeadlockWithSelfRepushingJob)
 		pool->push(make_worker("repush_worker_1"));
 		pool->push(make_worker("repush_worker_2"));
 
-		ASSERT_TRUE(std::get<0>(pool->start()));
+		ASSERT_TRUE(pool->start().has_value());
 
 		// 잡이 참조하는 상태는 공유 구조체로 묶어 값 캡처한다. 지역변수 참조 캡처는
 		// 잡이 반복 경계를 넘어 살아 있을 때 죽은 참조가 된다.
@@ -89,14 +88,14 @@ TEST_P(ThreadPoolRepushTest, StopDoesNotDeadlockWithSelfRepushingJob)
 		//
 		// 클로저가 자신을 담은 shared_ptr 를 강하게 잡으면 순환 참조가 되어 매 반복 누수한다.
 		// weak_ptr 로 잡아 순환을 끊는다.
-		auto repush = std::make_shared<std::function<std::tuple<bool, std::optional<std::string>>(void)>>();
-		std::weak_ptr<std::function<std::tuple<bool, std::optional<std::string>>(void)>> weak_repush = repush;
+		auto repush = std::make_shared<std::function<std::expected<void, std::string>(void)>>();
+		std::weak_ptr<std::function<std::expected<void, std::string>(void)>> weak_repush = repush;
 
-		*repush = [pool, state, weak_repush]() -> std::tuple<bool, std::optional<std::string>>
+		*repush = [pool, state, weak_repush]() -> std::expected<void, std::string>
 		{
 			if (!state->running.load())
 			{
-				return { true, std::nullopt };
+				return {};
 			}
 
 			state->cycles.fetch_add(1);
@@ -104,12 +103,12 @@ TEST_P(ThreadPoolRepushTest, StopDoesNotDeadlockWithSelfRepushingJob)
 			auto self = weak_repush.lock();
 			if (!self)
 			{
-				return { true, std::nullopt };
+				return {};
 			}
 
 			pool->push(std::make_shared<Thread::Job>(Thread::JobPriorities::LongTerm, *self, "repush_job"));
 
-			return { true, std::nullopt };
+			return {};
 		};
 
 		pool->push(std::make_shared<Thread::Job>(Thread::JobPriorities::LongTerm, *repush, "repush_job"));
@@ -124,9 +123,9 @@ TEST_P(ThreadPoolRepushTest, StopDoesNotDeadlockWithSelfRepushingJob)
 		ASSERT_GE(state->cycles.load(), 3) << "재등록 루프가 돌지 않아 경합 구간을 열지 못했다 (시도 " << attempt << ")";
 
 		state->running.store(false);
-		auto [stopped, stop_error] = pool->stop(stop_immediately);
+		auto stop_result = pool->stop(stop_immediately);
 
-		EXPECT_TRUE(stopped) << stop_error.value_or("");
+		EXPECT_TRUE(stop_result.has_value()) << (stop_result ? "" : stop_result.error());
 	}
 }
 
@@ -148,7 +147,7 @@ TEST(ThreadPoolTest, ConcurrentPushDuringStopIsSafe)
 		auto pool = std::make_shared<Thread::ThreadPool>("NotifyRacePool");
 		pool->push(make_worker("notify_worker_1"));
 		pool->push(make_worker("notify_worker_2"));
-		ASSERT_TRUE(std::get<0>(pool->start()));
+		ASSERT_TRUE(pool->start().has_value());
 
 		auto pushing = std::make_shared<std::atomic<bool>>(true);
 
@@ -160,15 +159,15 @@ TEST(ThreadPoolTest, ConcurrentPushDuringStopIsSafe)
 				{
 					pool->push(std::make_shared<Thread::Job>(
 						Thread::JobPriorities::LongTerm,
-						[]() -> std::tuple<bool, std::optional<std::string>> { return { true, std::nullopt }; },
+						[]() -> std::expected<void, std::string> { return {}; },
 						"noop_job"));
 				}
 			});
 
 		std::this_thread::sleep_for(std::chrono::milliseconds(5));
 
-		auto [stopped, stop_error] = pool->stop(true);
-		EXPECT_TRUE(stopped) << stop_error.value_or("");
+		auto stop_result = pool->stop(true);
+		EXPECT_TRUE(stop_result.has_value()) << (stop_result ? "" : stop_result.error());
 
 		pushing->store(false);
 		pusher.join();

@@ -6,6 +6,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <expected>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -37,9 +38,9 @@ protected:
 	// 대기한 뒤 자신을 thread_pool_ 에 다시 push 하여 반복한다. running_ 이 내려가면 재등록하지
 	// 않으므로 잡이 자연히 소멸한다.
 	// 반환 타입이 Job 콜백 계약과 같아 start()·재등록 쪽 람다는 한 줄 위임이면 된다.
-	auto queue_manager_lease_job(void) -> std::tuple<bool, std::optional<std::string>>;
-	auto queue_manager_retry_job(void) -> std::tuple<bool, std::optional<std::string>>;
-	auto queue_manager_ttl_job(void) -> std::tuple<bool, std::optional<std::string>>;
+	auto queue_manager_lease_job(void) -> std::expected<void, std::string>;
+	auto queue_manager_retry_job(void) -> std::expected<void, std::string>;
+	auto queue_manager_ttl_job(void) -> std::expected<void, std::string>;
 
 private:
 	// 상주 sweep 잡 수 = 전용 ThreadWorker 수. 잡이 주기 대기 중에도 워커를 점유하므로 둘은 같아야 한다.

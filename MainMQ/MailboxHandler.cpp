@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <expected>
 #include <filesystem>
 #include <format>
 #include <fstream>
@@ -87,10 +88,10 @@ auto MailboxHandler::start(void) -> std::tuple<bool, std::optional<std::string>>
 	);
 	thread_pool_->push(cleanup_worker);
 
-	auto [started, start_error] = thread_pool_->start();
-	if (!started)
+	auto start_result = thread_pool_->start();
+	if (!start_result)
 	{
-		return { false, start_error };
+		return { false, start_result.error() };
 	}
 
 	// Initialize metrics
@@ -123,10 +124,10 @@ auto MailboxHandler::start(void) -> std::tuple<bool, std::optional<std::string>>
 	// Launch request processing worker
 	auto request_job = std::make_shared<Thread::Job>(
 		Thread::JobPriorities::LongTerm,
-		[this]() -> std::tuple<bool, std::optional<std::string>>
+		[this]() -> std::expected<void, std::string>
 		{
 			request_processing_worker();
-			return { true, std::nullopt };
+			return {};
 		},
 		"MailboxRequestWorker"
 	);
@@ -135,10 +136,10 @@ auto MailboxHandler::start(void) -> std::tuple<bool, std::optional<std::string>>
 	// Launch stale cleanup worker
 	auto cleanup_job = std::make_shared<Thread::Job>(
 		Thread::JobPriorities::LongTerm,
-		[this]() -> std::tuple<bool, std::optional<std::string>>
+		[this]() -> std::expected<void, std::string>
 		{
 			stale_cleanup_worker();
-			return { true, std::nullopt };
+			return {};
 		},
 		"MailboxCleanupWorker"
 	);
@@ -498,12 +499,12 @@ auto MailboxHandler::atomic_write(const std::string& target_path, const std::str
 
 	// Durable, fail-closed write: abort before rename if the temp cannot be fully written
 	// (e.g. ENOSPC), so a truncated response never replaces a valid one. (Defect D-02)
-	auto [write_ok, write_error] = write_file_durable(temp_path, content);
-	if (!write_ok)
+	auto write_result = write_file_durable(temp_path, content);
+	if (!write_result)
 	{
 		std::error_code ec;
 		std::filesystem::remove(temp_path, ec);
-		return { false, write_error };
+		return { false, write_result.error() };
 	}
 
 	std::error_code ec;

@@ -42,12 +42,13 @@ namespace
 
 	auto affected_rows(DataBase::SQLite& db) -> int32_t
 	{
-		auto [stmt, error] = db.prepare("SELECT changes();");
-		if (!stmt)
+		auto stmt_result = db.prepare("SELECT changes();");
+		if (!stmt_result)
 		{
 			return -1;
 		}
 
+		auto stmt = *stmt_result;
 		if (stmt->step() == SQLITE_ROW)
 		{
 			return stmt->column_int(0);
@@ -119,18 +120,18 @@ auto SQLiteAdapter::open(const BackendConfig& config) -> std::tuple<bool, std::o
 		}
 	}
 
-	auto [opened, open_message] = db_.open(sqlite_config_.db_path);
-	if (!opened)
+	auto open_result = db_.open(sqlite_config_.db_path);
+	if (!open_result)
 	{
-		return { false, open_message };
+		return { false, open_result.error() };
 	}
 
 	if (sqlite_config_.busy_timeout_ms > 0)
 	{
-		auto [timeout_ok, timeout_message] = db_.set_busy_timeout(sqlite_config_.busy_timeout_ms);
-		if (!timeout_ok)
+		auto timeout_result = db_.set_busy_timeout(sqlite_config_.busy_timeout_ms);
+		if (!timeout_result)
 		{
-			return { false, timeout_message };
+			return { false, timeout_result.error() };
 		}
 	}
 
@@ -177,10 +178,10 @@ auto SQLiteAdapter::enqueue(const MessageEnvelope& message) -> std::tuple<bool, 
 	envelope["attempt"] = message.attempt;
 	envelope["createdAt"] = message.created_at_ms > 0 ? message.created_at_ms : now;
 
-	auto [tx_ok, tx_error] = db_.begin_transaction();
-	if (!tx_ok)
+	auto tx_result = db_.begin_transaction();
+	if (!tx_result)
 	{
-		return { false, tx_error };
+		return { false, tx_result.error() };
 	}
 
 	// Insert into kv table
@@ -189,13 +190,14 @@ auto SQLiteAdapter::enqueue(const MessageEnvelope& message) -> std::tuple<bool, 
 		sqlite_config_.kv_table
 	);
 
-	auto [kv_stmt, kv_error] = db_.prepare(kv_sql);
-	if (!kv_stmt)
+	auto kv_stmt_result = db_.prepare(kv_sql);
+	if (!kv_stmt_result)
 	{
 		db_.rollback();
-		return { false, kv_error };
+		return { false, kv_stmt_result.error() };
 	}
 
+	auto kv_stmt = *kv_stmt_result;
 	kv_stmt->bind_text(1, message.key);
 	kv_stmt->bind_text(2, envelope.dump());
 	kv_stmt->bind_text(3, "message");
@@ -214,13 +216,14 @@ auto SQLiteAdapter::enqueue(const MessageEnvelope& message) -> std::tuple<bool, 
 		sqlite_config_.message_index_table
 	);
 
-	auto [idx_stmt, idx_error] = db_.prepare(idx_sql);
-	if (!idx_stmt)
+	auto idx_stmt_result = db_.prepare(idx_sql);
+	if (!idx_stmt_result)
 	{
 		db_.rollback();
-		return { false, idx_error };
+		return { false, idx_stmt_result.error() };
 	}
 
+	auto idx_stmt = *idx_stmt_result;
 	auto available_at = message.available_at_ms > 0 ? message.available_at_ms : now;
 	auto state = available_at > now ? MessageState::Delayed : MessageState::Ready;
 
@@ -239,11 +242,11 @@ auto SQLiteAdapter::enqueue(const MessageEnvelope& message) -> std::tuple<bool, 
 		return { false, "failed to insert into msg_index table" };
 	}
 
-	auto [commit_ok, commit_error] = db_.commit();
-	if (!commit_ok)
+	auto commit_result = db_.commit();
+	if (!commit_result)
 	{
 		db_.rollback();
-		return { false, commit_error };
+		return { false, commit_result.error() };
 	}
 
 	return { true, std::nullopt };
@@ -265,10 +268,10 @@ auto SQLiteAdapter::lease_next(const std::string& queue, const std::string& cons
 	auto now = current_time_ms();
 	auto lease_until = now + (static_cast<int64_t>(visibility_timeout_sec) * 1000);
 
-	auto [tx_ok, tx_error] = db_.begin_transaction();
-	if (!tx_ok)
+	auto tx_result = db_.begin_transaction();
+	if (!tx_result)
 	{
-		result.error = tx_error;
+		result.error = tx_result.error();
 		return result;
 	}
 
@@ -284,14 +287,15 @@ auto SQLiteAdapter::lease_next(const std::string& queue, const std::string& cons
 		sqlite_config_.message_index_table
 	);
 
-	auto [select_stmt, select_error] = db_.prepare(select_sql);
-	if (!select_stmt)
+	auto select_stmt_result = db_.prepare(select_sql);
+	if (!select_stmt_result)
 	{
 		db_.rollback();
-		result.error = select_error;
+		result.error = select_stmt_result.error();
 		return result;
 	}
 
+	auto select_stmt = *select_stmt_result;
 	select_stmt->bind_text(1, queue);
 	select_stmt->bind_int64(2, now);
 	select_stmt->bind_text(3, consumer_id);
@@ -315,14 +319,15 @@ auto SQLiteAdapter::lease_next(const std::string& queue, const std::string& cons
 		sqlite_config_.message_index_table
 	);
 
-	auto [update_stmt, update_error] = db_.prepare(update_sql);
-	if (!update_stmt)
+	auto update_stmt_result = db_.prepare(update_sql);
+	if (!update_stmt_result)
 	{
 		db_.rollback();
-		result.error = update_error;
+		result.error = update_stmt_result.error();
 		return result;
 	}
 
+	auto update_stmt = *update_stmt_result;
 	update_stmt->bind_int64(1, lease_until);
 	update_stmt->bind_int(2, attempt + 1);
 	update_stmt->bind_text(3, lease_id);
@@ -342,14 +347,15 @@ auto SQLiteAdapter::lease_next(const std::string& queue, const std::string& cons
 		sqlite_config_.kv_table
 	);
 
-	auto [kv_stmt, kv_error] = db_.prepare(kv_sql);
-	if (!kv_stmt)
+	auto kv_stmt_result = db_.prepare(kv_sql);
+	if (!kv_stmt_result)
 	{
 		db_.rollback();
-		result.error = kv_error;
+		result.error = kv_stmt_result.error();
 		return result;
 	}
 
+	auto kv_stmt = *kv_stmt_result;
 	kv_stmt->bind_text(1, message_key);
 
 	if (kv_stmt->step() != SQLITE_ROW)
@@ -361,11 +367,11 @@ auto SQLiteAdapter::lease_next(const std::string& queue, const std::string& cons
 
 	std::string value_json = kv_stmt->column_text(0);
 
-	auto [commit_ok, commit_error] = db_.commit();
-	if (!commit_ok)
+	auto commit_result = db_.commit();
+	if (!commit_result)
 	{
 		db_.rollback();
-		result.error = commit_error;
+		result.error = commit_result.error();
 		return result;
 	}
 
@@ -411,10 +417,10 @@ auto SQLiteAdapter::ack(const LeaseToken& lease) -> std::tuple<bool, std::option
 		return { false, "database is not open" };
 	}
 
-	auto [tx_ok, tx_error] = db_.begin_transaction();
-	if (!tx_ok)
+	auto tx_result = db_.begin_transaction();
+	if (!tx_result)
 	{
-		return { false, tx_error };
+		return { false, tx_result.error() };
 	}
 
 	// Delete from msg_index (CASCADE will not delete kv, so delete explicitly)
@@ -423,13 +429,14 @@ auto SQLiteAdapter::ack(const LeaseToken& lease) -> std::tuple<bool, std::option
 		sqlite_config_.message_index_table
 	);
 
-	auto [idx_stmt, idx_error] = db_.prepare(idx_sql);
-	if (!idx_stmt)
+	auto idx_stmt_result = db_.prepare(idx_sql);
+	if (!idx_stmt_result)
 	{
 		db_.rollback();
-		return { false, idx_error };
+		return { false, idx_stmt_result.error() };
 	}
 
+	auto idx_stmt = *idx_stmt_result;
 	idx_stmt->bind_text(1, lease.message_key);
 	idx_stmt->bind_text(2, lease.lease_id);
 	idx_stmt->bind_text(3, lease.lease_id);
@@ -453,13 +460,14 @@ auto SQLiteAdapter::ack(const LeaseToken& lease) -> std::tuple<bool, std::option
 		sqlite_config_.kv_table
 	);
 
-	auto [kv_stmt, kv_error] = db_.prepare(kv_sql);
-	if (!kv_stmt)
+	auto kv_stmt_result = db_.prepare(kv_sql);
+	if (!kv_stmt_result)
 	{
 		db_.rollback();
-		return { false, kv_error };
+		return { false, kv_stmt_result.error() };
 	}
 
+	auto kv_stmt = *kv_stmt_result;
 	kv_stmt->bind_text(1, lease.message_key);
 
 	if (kv_stmt->step() != SQLITE_DONE)
@@ -468,11 +476,11 @@ auto SQLiteAdapter::ack(const LeaseToken& lease) -> std::tuple<bool, std::option
 		return { false, "failed to delete from kv table" };
 	}
 
-	auto [commit_ok, commit_error] = db_.commit();
-	if (!commit_ok)
+	auto commit_result = db_.commit();
+	if (!commit_result)
 	{
 		db_.rollback();
-		return { false, commit_error };
+		return { false, commit_result.error() };
 	}
 
 	return { true, std::nullopt };
@@ -499,7 +507,8 @@ auto SQLiteAdapter::nack(const LeaseToken& lease, const std::string& reason, con
 			"SELECT attempt FROM {} WHERE message_key = ? AND state = 'inflight';",
 			sqlite_config_.message_index_table
 		);
-		auto [attempt_stmt, attempt_error] = db_.prepare(attempt_sql);
+		auto attempt_stmt_result = db_.prepare(attempt_sql);
+		auto attempt_stmt = attempt_stmt_result.value_or(nullptr);
 		if (attempt_stmt)
 		{
 			attempt_stmt->bind_text(1, lease.message_key);
@@ -512,10 +521,10 @@ auto SQLiteAdapter::nack(const LeaseToken& lease, const std::string& reason, con
 
 	if (effective_requeue)
 	{
-		auto [tx_ok, tx_error] = db_.begin_transaction();
-		if (!tx_ok)
+		auto tx_result = db_.begin_transaction();
+		if (!tx_result)
 		{
-			return { false, tx_error };
+			return { false, tx_result.error() };
 		}
 
 		// Return to ready state
@@ -524,13 +533,14 @@ auto SQLiteAdapter::nack(const LeaseToken& lease, const std::string& reason, con
 			sqlite_config_.message_index_table
 		);
 
-		auto [stmt, error] = db_.prepare(sql);
-		if (!stmt)
+		auto stmt_result = db_.prepare(sql);
+		if (!stmt_result)
 		{
 			db_.rollback();
-			return { false, error };
+			return { false, stmt_result.error() };
 		}
 
+		auto stmt = *stmt_result;
 		stmt->bind_int64(1, now);
 		stmt->bind_text(2, lease.message_key);
 		stmt->bind_text(3, lease.lease_id);
@@ -549,20 +559,20 @@ auto SQLiteAdapter::nack(const LeaseToken& lease, const std::string& reason, con
 			return { false, "nack rejected: message is not inflight, or the lease is held by another consumer" };
 		}
 
-		auto [commit_ok, commit_error] = db_.commit();
-		if (!commit_ok)
+		auto commit_result = db_.commit();
+		if (!commit_result)
 		{
 			db_.rollback();
-			return { false, commit_error };
+			return { false, commit_result.error() };
 		}
 	}
 	else
 	{
 		// Move to DLQ
-		auto [tx_ok, tx_error] = db_.begin_transaction();
-		if (!tx_ok)
+		auto tx_result = db_.begin_transaction();
+		if (!tx_result)
 		{
-			return { false, tx_error };
+			return { false, tx_result.error() };
 		}
 
 		// Update state to dlq, recording reason and timestamp so list-dlq can show them. (D-13)
@@ -571,13 +581,14 @@ auto SQLiteAdapter::nack(const LeaseToken& lease, const std::string& reason, con
 			sqlite_config_.message_index_table
 		);
 
-		auto [idx_stmt, idx_error] = db_.prepare(idx_sql);
-		if (!idx_stmt)
+		auto idx_stmt_result = db_.prepare(idx_sql);
+		if (!idx_stmt_result)
 		{
 			db_.rollback();
-			return { false, idx_error };
+			return { false, idx_stmt_result.error() };
 		}
 
+		auto idx_stmt = *idx_stmt_result;
 		idx_stmt->bind_text(1, reason);
 		idx_stmt->bind_int64(2, current_time_ms());
 		idx_stmt->bind_text(3, lease.message_key);
@@ -603,13 +614,14 @@ auto SQLiteAdapter::nack(const LeaseToken& lease, const std::string& reason, con
 			sqlite_config_.kv_table
 		);
 
-		auto [kv_select_stmt, kv_select_error] = db_.prepare(kv_select_sql);
-		if (!kv_select_stmt)
+		auto kv_select_stmt_result = db_.prepare(kv_select_sql);
+		if (!kv_select_stmt_result)
 		{
 			db_.rollback();
-			return { false, kv_select_error };
+			return { false, kv_select_stmt_result.error() };
 		}
 
+		auto kv_select_stmt = *kv_select_stmt_result;
 		kv_select_stmt->bind_text(1, lease.message_key);
 
 		if (kv_select_stmt->step() == SQLITE_ROW)
@@ -626,7 +638,8 @@ auto SQLiteAdapter::nack(const LeaseToken& lease, const std::string& reason, con
 					sqlite_config_.kv_table
 				);
 
-				auto [kv_update_stmt, kv_update_error] = db_.prepare(kv_update_sql);
+				auto kv_update_stmt_result = db_.prepare(kv_update_sql);
+				auto kv_update_stmt = kv_update_stmt_result.value_or(nullptr);
 				if (kv_update_stmt)
 				{
 					kv_update_stmt->bind_text(1, envelope.dump());
@@ -641,11 +654,11 @@ auto SQLiteAdapter::nack(const LeaseToken& lease, const std::string& reason, con
 			}
 		}
 
-		auto [commit_ok, commit_error] = db_.commit();
-		if (!commit_ok)
+		auto commit_result = db_.commit();
+		if (!commit_result)
 		{
 			db_.rollback();
-			return { false, commit_error };
+			return { false, commit_result.error() };
 		}
 	}
 
@@ -662,10 +675,10 @@ auto SQLiteAdapter::extend_lease(const LeaseToken& lease, const int32_t& visibil
 		return { false, "database is not open" };
 	}
 
-	auto [tx_ok, tx_error] = db_.begin_transaction();
-	if (!tx_ok)
+	auto tx_result = db_.begin_transaction();
+	if (!tx_result)
 	{
-		return { false, tx_error };
+		return { false, tx_result.error() };
 	}
 
 	auto now = current_time_ms();
@@ -676,13 +689,14 @@ auto SQLiteAdapter::extend_lease(const LeaseToken& lease, const int32_t& visibil
 		sqlite_config_.message_index_table
 	);
 
-	auto [stmt, error] = db_.prepare(sql);
-	if (!stmt)
+	auto stmt_result = db_.prepare(sql);
+	if (!stmt_result)
 	{
 		db_.rollback();
-		return { false, error };
+		return { false, stmt_result.error() };
 	}
 
+	auto stmt = *stmt_result;
 	stmt->bind_int64(1, new_lease_until);
 	stmt->bind_text(2, lease.message_key);
 	stmt->bind_int64(3, now);
@@ -702,11 +716,11 @@ auto SQLiteAdapter::extend_lease(const LeaseToken& lease, const int32_t& visibil
 		return { false, "extend_lease rejected: lease not held, already expired, or held by another consumer" };
 	}
 
-	auto [commit_ok, commit_error] = db_.commit();
-	if (!commit_ok)
+	auto commit_result = db_.commit();
+	if (!commit_result)
 	{
 		db_.rollback();
-		return { false, commit_error };
+		return { false, commit_result.error() };
 	}
 
 	return { true, std::nullopt };
@@ -727,12 +741,13 @@ auto SQLiteAdapter::load_policy(const std::string& queue) -> std::tuple<std::opt
 		sqlite_config_.kv_table
 	);
 
-	auto [stmt, error] = db_.prepare(sql);
-	if (!stmt)
+	auto stmt_result = db_.prepare(sql);
+	if (!stmt_result)
 	{
-		return { std::nullopt, error };
+		return { std::nullopt, stmt_result.error() };
 	}
 
+	auto stmt = *stmt_result;
 	stmt->bind_text(1, policy_key);
 
 	if (stmt->step() != SQLITE_ROW)
@@ -806,12 +821,13 @@ auto SQLiteAdapter::save_policy(const std::string& queue, const QueuePolicy& pol
 		sqlite_config_.kv_table
 	);
 
-	auto [stmt, error] = db_.prepare(sql);
-	if (!stmt)
+	auto stmt_result = db_.prepare(sql);
+	if (!stmt_result)
 	{
-		return { false, error };
+		return { false, stmt_result.error() };
 	}
 
+	auto stmt = *stmt_result;
 	stmt->bind_text(1, policy_key);
 	stmt->bind_text(2, policy_json.dump());
 	stmt->bind_text(3, "policy");
@@ -842,12 +858,13 @@ auto SQLiteAdapter::metrics(const std::string& queue) -> std::tuple<QueueMetrics
 		sqlite_config_.message_index_table
 	);
 
-	auto [stmt, error] = db_.prepare(sql);
-	if (!stmt)
+	auto stmt_result = db_.prepare(sql);
+	if (!stmt_result)
 	{
-		return { metrics, error };
+		return { metrics, stmt_result.error() };
 	}
 
+	auto stmt = *stmt_result;
 	stmt->bind_text(1, queue);
 
 	while (stmt->step() == SQLITE_ROW)
@@ -885,10 +902,10 @@ auto SQLiteAdapter::recover_expired_leases(void) -> std::tuple<int32_t, std::opt
 		return { 0, "database is not open" };
 	}
 
-	auto [tx_ok, tx_error] = db_.begin_transaction();
-	if (!tx_ok)
+	auto tx_result = db_.begin_transaction();
+	if (!tx_result)
 	{
-		return { 0, tx_error };
+		return { 0, tx_result.error() };
 	}
 
 	auto now = current_time_ms();
@@ -898,13 +915,14 @@ auto SQLiteAdapter::recover_expired_leases(void) -> std::tuple<int32_t, std::opt
 		sqlite_config_.message_index_table
 	);
 
-	auto [stmt, error] = db_.prepare(sql);
-	if (!stmt)
+	auto stmt_result = db_.prepare(sql);
+	if (!stmt_result)
 	{
 		db_.rollback();
-		return { 0, error };
+		return { 0, stmt_result.error() };
 	}
 
+	auto stmt = *stmt_result;
 	stmt->bind_int64(1, now);
 
 	if (stmt->step() != SQLITE_DONE)
@@ -915,24 +933,25 @@ auto SQLiteAdapter::recover_expired_leases(void) -> std::tuple<int32_t, std::opt
 
 	// Get count of affected rows
 	std::string count_sql = "SELECT changes();";
-	auto [count_stmt, count_error] = db_.prepare(count_sql);
-	if (!count_stmt)
+	auto count_stmt_result = db_.prepare(count_sql);
+	if (!count_stmt_result)
 	{
 		db_.rollback();
-		return { 0, count_error };
+		return { 0, count_stmt_result.error() };
 	}
 
+	auto count_stmt = *count_stmt_result;
 	int32_t count = 0;
 	if (count_stmt->step() == SQLITE_ROW)
 	{
 		count = count_stmt->column_int(0);
 	}
 
-	auto [commit_ok, commit_error] = db_.commit();
-	if (!commit_ok)
+	auto commit_result = db_.commit();
+	if (!commit_result)
 	{
 		db_.rollback();
-		return { 0, commit_error };
+		return { 0, commit_result.error() };
 	}
 
 	return { count, std::nullopt };
@@ -947,10 +966,10 @@ auto SQLiteAdapter::process_delayed_messages(void) -> std::tuple<int32_t, std::o
 		return { 0, "database is not open" };
 	}
 
-	auto [tx_ok, tx_error] = db_.begin_transaction();
-	if (!tx_ok)
+	auto tx_result = db_.begin_transaction();
+	if (!tx_result)
 	{
-		return { 0, tx_error };
+		return { 0, tx_result.error() };
 	}
 
 	auto now = current_time_ms();
@@ -960,13 +979,14 @@ auto SQLiteAdapter::process_delayed_messages(void) -> std::tuple<int32_t, std::o
 		sqlite_config_.message_index_table
 	);
 
-	auto [stmt, error] = db_.prepare(sql);
-	if (!stmt)
+	auto stmt_result = db_.prepare(sql);
+	if (!stmt_result)
 	{
 		db_.rollback();
-		return { 0, error };
+		return { 0, stmt_result.error() };
 	}
 
+	auto stmt = *stmt_result;
 	stmt->bind_int64(1, now);
 
 	if (stmt->step() != SQLITE_DONE)
@@ -977,24 +997,25 @@ auto SQLiteAdapter::process_delayed_messages(void) -> std::tuple<int32_t, std::o
 
 	// Get count of affected rows
 	std::string count_sql = "SELECT changes();";
-	auto [count_stmt, count_error] = db_.prepare(count_sql);
-	if (!count_stmt)
+	auto count_stmt_result = db_.prepare(count_sql);
+	if (!count_stmt_result)
 	{
 		db_.rollback();
-		return { 0, count_error };
+		return { 0, count_stmt_result.error() };
 	}
 
+	auto count_stmt = *count_stmt_result;
 	int32_t count = 0;
 	if (count_stmt->step() == SQLITE_ROW)
 	{
 		count = count_stmt->column_int(0);
 	}
 
-	auto [commit_ok, commit_error] = db_.commit();
-	if (!commit_ok)
+	auto commit_result = db_.commit();
+	if (!commit_result)
 	{
 		db_.rollback();
-		return { 0, commit_error };
+		return { 0, commit_result.error() };
 	}
 
 	return { count, std::nullopt };
@@ -1018,12 +1039,13 @@ auto SQLiteAdapter::get_expired_inflight_messages(void) -> std::tuple<std::vecto
 		sqlite_config_.message_index_table
 	);
 
-	auto [stmt, error] = db_.prepare(sql);
-	if (!stmt)
+	auto stmt_result = db_.prepare(sql);
+	if (!stmt_result)
 	{
-		return { expired_list, error };
+		return { expired_list, stmt_result.error() };
 	}
 
+	auto stmt = *stmt_result;
 	stmt->bind_int64(1, now);
 
 	while (stmt->step() == SQLITE_ROW)
@@ -1047,10 +1069,10 @@ auto SQLiteAdapter::delay_message(const std::string& message_key, int64_t delay_
 		return { false, "database is not open" };
 	}
 
-	auto [tx_ok, tx_error] = db_.begin_transaction();
-	if (!tx_ok)
+	auto tx_result = db_.begin_transaction();
+	if (!tx_result)
 	{
-		return { false, tx_error };
+		return { false, tx_result.error() };
 	}
 
 	auto now = current_time_ms();
@@ -1061,13 +1083,14 @@ auto SQLiteAdapter::delay_message(const std::string& message_key, int64_t delay_
 		sqlite_config_.message_index_table
 	);
 
-	auto [stmt, error] = db_.prepare(sql);
-	if (!stmt)
+	auto stmt_result = db_.prepare(sql);
+	if (!stmt_result)
 	{
 		db_.rollback();
-		return { false, error };
+		return { false, stmt_result.error() };
 	}
 
+	auto stmt = *stmt_result;
 	stmt->bind_int64(1, available_at);
 	stmt->bind_text(2, message_key);
 
@@ -1077,11 +1100,11 @@ auto SQLiteAdapter::delay_message(const std::string& message_key, int64_t delay_
 		return { false, "failed to delay message" };
 	}
 
-	auto [commit_ok, commit_error] = db_.commit();
-	if (!commit_ok)
+	auto commit_result = db_.commit();
+	if (!commit_result)
 	{
 		db_.rollback();
-		return { false, commit_error };
+		return { false, commit_result.error() };
 	}
 
 	return { true, std::nullopt };
@@ -1096,10 +1119,10 @@ auto SQLiteAdapter::move_to_dlq(const std::string& message_key, const std::strin
 		return { false, "database is not open" };
 	}
 
-	auto [tx_ok, tx_error] = db_.begin_transaction();
-	if (!tx_ok)
+	auto tx_result = db_.begin_transaction();
+	if (!tx_result)
 	{
-		return { false, tx_error };
+		return { false, tx_result.error() };
 	}
 
 	auto now = current_time_ms();
@@ -1110,13 +1133,14 @@ auto SQLiteAdapter::move_to_dlq(const std::string& message_key, const std::strin
 		sqlite_config_.message_index_table
 	);
 
-	auto [idx_stmt, idx_error] = db_.prepare(idx_sql);
-	if (!idx_stmt)
+	auto idx_stmt_result = db_.prepare(idx_sql);
+	if (!idx_stmt_result)
 	{
 		db_.rollback();
-		return { false, idx_error };
+		return { false, idx_stmt_result.error() };
 	}
 
+	auto idx_stmt = *idx_stmt_result;
 	idx_stmt->bind_text(1, reason);
 	idx_stmt->bind_int64(2, now);
 	idx_stmt->bind_text(3, message_key);
@@ -1133,7 +1157,8 @@ auto SQLiteAdapter::move_to_dlq(const std::string& message_key, const std::strin
 		sqlite_config_.kv_table
 	);
 
-	auto [kv_select_stmt, kv_select_error] = db_.prepare(kv_select_sql);
+	auto kv_select_stmt_result = db_.prepare(kv_select_sql);
+	auto kv_select_stmt = kv_select_stmt_result.value_or(nullptr);
 	if (kv_select_stmt)
 	{
 		kv_select_stmt->bind_text(1, message_key);
@@ -1152,7 +1177,8 @@ auto SQLiteAdapter::move_to_dlq(const std::string& message_key, const std::strin
 					sqlite_config_.kv_table
 				);
 
-				auto [kv_update_stmt, kv_update_error] = db_.prepare(kv_update_sql);
+				auto kv_update_stmt_result = db_.prepare(kv_update_sql);
+				auto kv_update_stmt = kv_update_stmt_result.value_or(nullptr);
 				if (kv_update_stmt)
 				{
 					kv_update_stmt->bind_text(1, envelope.dump());
@@ -1168,11 +1194,11 @@ auto SQLiteAdapter::move_to_dlq(const std::string& message_key, const std::strin
 		}
 	}
 
-	auto [commit_ok, commit_error] = db_.commit();
-	if (!commit_ok)
+	auto commit_result = db_.commit();
+	if (!commit_result)
 	{
 		db_.rollback();
-		return { false, commit_error };
+		return { false, commit_result.error() };
 	}
 
 	return { true, std::nullopt };
@@ -1187,10 +1213,10 @@ auto SQLiteAdapter::apply_pragmas(void) -> std::tuple<bool, std::optional<std::s
 		"OFF", "NORMAL", "FULL", "EXTRA"
 	};
 
-	auto [foreign_ok, foreign_message] = db_.execute("PRAGMA foreign_keys = ON;");
-	if (!foreign_ok)
+	auto foreign_result = db_.execute("PRAGMA foreign_keys = ON;");
+	if (!foreign_result)
 	{
-		return { false, foreign_message };
+		return { false, foreign_result.error() };
 	}
 
 	if (!sqlite_config_.journal_mode.empty())
@@ -1201,10 +1227,10 @@ auto SQLiteAdapter::apply_pragmas(void) -> std::tuple<bool, std::optional<std::s
 		}
 
 		std::string pragma = "PRAGMA journal_mode=" + sqlite_config_.journal_mode + ";";
-		auto [journal_ok, journal_message] = db_.execute(pragma);
-		if (!journal_ok)
+		auto journal_result = db_.execute(pragma);
+		if (!journal_result)
 		{
-			return { false, journal_message };
+			return { false, journal_result.error() };
 		}
 	}
 
@@ -1216,10 +1242,10 @@ auto SQLiteAdapter::apply_pragmas(void) -> std::tuple<bool, std::optional<std::s
 		}
 
 		std::string pragma = "PRAGMA synchronous=" + sqlite_config_.synchronous + ";";
-		auto [sync_ok, sync_message] = db_.execute(pragma);
-		if (!sync_ok)
+		auto sync_result = db_.execute(pragma);
+		if (!sync_result)
 		{
-			return { false, sync_message };
+			return { false, sync_result.error() };
 		}
 	}
 
@@ -1239,20 +1265,20 @@ auto SQLiteAdapter::ensure_schema(void) -> std::tuple<bool, std::optional<std::s
 		return { false, sql_message };
 	}
 
-	auto [applied, apply_message] = db_.execute(sql_text.value());
-	if (!applied)
+	auto apply_result = db_.execute(sql_text.value());
+	if (!apply_result)
 	{
-		return { false, apply_message };
+		return { false, apply_result.error() };
 	}
 
 	// Pre-fencing databases lack the column; rows inflight across the upgrade get an empty owner,
 	// so their ack is rejected once and the lease sweep redelivers them. (D-55)
-	auto [migrated, migrate_error] = db_.ensure_column(
+	auto migrate_result = db_.ensure_column(
 		sqlite_config_.message_index_table, "lease_consumer_id", "TEXT NOT NULL DEFAULT ''"
 	);
-	if (!migrated)
+	if (!migrate_result)
 	{
-		return { false, std::format("lease ownership migration failed: {}", migrate_error.value_or("unknown")) };
+		return { false, std::format("lease ownership migration failed: {}", migrate_result.error()) };
 	}
 
 	return { true, std::nullopt };
@@ -1261,20 +1287,20 @@ auto SQLiteAdapter::ensure_schema(void) -> std::tuple<bool, std::optional<std::s
 auto SQLiteAdapter::load_schema_sql(void) -> std::tuple<std::optional<std::string>, std::optional<std::string>>
 {
 	File source;
-	auto [opened, open_message] = source.open(schema_path_, std::ios::in | std::ios::binary);
-	if (!opened)
+	auto open_result = source.open(schema_path_, std::ios::in | std::ios::binary);
+	if (!open_result)
 	{
-		return { std::nullopt, open_message };
+		return { std::nullopt, open_result.error() };
 	}
 
-	auto [data, read_message] = source.read_bytes();
+	auto read_result = source.read_bytes();
 	source.close();
-	if (data == std::nullopt)
+	if (!read_result)
 	{
-		return { std::nullopt, read_message };
+		return { std::nullopt, read_result.error() };
 	}
 
-	std::string sql = Converter::to_string(data.value());
+	std::string sql = Converter::to_string(read_result.value());
 	if (sql.empty())
 	{
 		return { std::nullopt, "schema sql is empty" };
@@ -1304,12 +1330,13 @@ auto SQLiteAdapter::list_dlq_messages(const std::string& queue, int32_t limit)
 		sqlite_config_.message_index_table
 	);
 
-	auto [stmt, error] = db_.prepare(sql);
-	if (!stmt)
+	auto stmt_result = db_.prepare(sql);
+	if (!stmt_result)
 	{
-		return { dlq_list, error };
+		return { dlq_list, stmt_result.error() };
 	}
 
+	auto stmt = *stmt_result;
 	stmt->bind_text(1, queue);
 	stmt->bind_int(2, limit);
 
@@ -1337,10 +1364,10 @@ auto SQLiteAdapter::reprocess_dlq_message(const std::string& message_key)
 		return { false, "database is not open" };
 	}
 
-	auto [tx_ok, tx_error] = db_.begin_transaction();
-	if (!tx_ok)
+	auto tx_result = db_.begin_transaction();
+	if (!tx_result)
 	{
-		return { false, tx_error };
+		return { false, tx_result.error() };
 	}
 
 	auto now = current_time_ms();
@@ -1352,13 +1379,14 @@ auto SQLiteAdapter::reprocess_dlq_message(const std::string& message_key)
 		sqlite_config_.message_index_table
 	);
 
-	auto [stmt, error] = db_.prepare(sql);
-	if (!stmt)
+	auto stmt_result = db_.prepare(sql);
+	if (!stmt_result)
 	{
 		db_.rollback();
-		return { false, error };
+		return { false, stmt_result.error() };
 	}
 
+	auto stmt = *stmt_result;
 	stmt->bind_int64(1, now);
 	stmt->bind_text(2, message_key);
 
@@ -1374,7 +1402,8 @@ auto SQLiteAdapter::reprocess_dlq_message(const std::string& message_key)
 		sqlite_config_.kv_table
 	);
 
-	auto [kv_select_stmt, kv_select_error] = db_.prepare(kv_select_sql);
+	auto kv_select_stmt_result = db_.prepare(kv_select_sql);
+	auto kv_select_stmt = kv_select_stmt_result.value_or(nullptr);
 	if (kv_select_stmt)
 	{
 		kv_select_stmt->bind_text(1, message_key);
@@ -1394,7 +1423,8 @@ auto SQLiteAdapter::reprocess_dlq_message(const std::string& message_key)
 					sqlite_config_.kv_table
 				);
 
-				auto [kv_update_stmt, kv_update_error] = db_.prepare(kv_update_sql);
+				auto kv_update_stmt_result = db_.prepare(kv_update_sql);
+				auto kv_update_stmt = kv_update_stmt_result.value_or(nullptr);
 				if (kv_update_stmt)
 				{
 					kv_update_stmt->bind_text(1, envelope.dump());
@@ -1410,11 +1440,11 @@ auto SQLiteAdapter::reprocess_dlq_message(const std::string& message_key)
 		}
 	}
 
-	auto [commit_ok, commit_error] = db_.commit();
-	if (!commit_ok)
+	auto commit_result = db_.commit();
+	if (!commit_result)
 	{
 		db_.rollback();
-		return { false, commit_error };
+		return { false, commit_result.error() };
 	}
 
 	return { true, std::nullopt };
@@ -1431,10 +1461,10 @@ auto SQLiteAdapter::purge_expired_messages(void) -> std::tuple<int32_t, std::opt
 
 	auto now = current_time_ms();
 
-	auto [tx_ok, tx_error] = db_.begin_transaction();
-	if (!tx_ok)
+	auto tx_result = db_.begin_transaction();
+	if (!tx_result)
 	{
-		return { 0, tx_error };
+		return { 0, tx_result.error() };
 	}
 
 	// Get expired message keys for kv table cleanup
@@ -1443,13 +1473,14 @@ auto SQLiteAdapter::purge_expired_messages(void) -> std::tuple<int32_t, std::opt
 		sqlite_config_.message_index_table
 	);
 
-	auto [select_stmt, select_error] = db_.prepare(select_sql);
-	if (!select_stmt)
+	auto select_stmt_result = db_.prepare(select_sql);
+	if (!select_stmt_result)
 	{
 		db_.rollback();
-		return { 0, select_error };
+		return { 0, select_stmt_result.error() };
 	}
 
+	auto select_stmt = *select_stmt_result;
 	select_stmt->bind_int64(1, now);
 
 	std::vector<std::string> expired_keys;
@@ -1470,13 +1501,14 @@ auto SQLiteAdapter::purge_expired_messages(void) -> std::tuple<int32_t, std::opt
 		sqlite_config_.message_index_table
 	);
 
-	auto [del_idx_stmt, del_idx_error] = db_.prepare(delete_idx_sql);
-	if (!del_idx_stmt)
+	auto del_idx_stmt_result = db_.prepare(delete_idx_sql);
+	if (!del_idx_stmt_result)
 	{
 		db_.rollback();
-		return { 0, del_idx_error };
+		return { 0, del_idx_stmt_result.error() };
 	}
 
+	auto del_idx_stmt = *del_idx_stmt_result;
 	del_idx_stmt->bind_int64(1, now);
 
 	if (del_idx_stmt->step() != SQLITE_DONE)
@@ -1493,7 +1525,8 @@ auto SQLiteAdapter::purge_expired_messages(void) -> std::tuple<int32_t, std::opt
 			sqlite_config_.kv_table
 		);
 
-		auto [kv_stmt, kv_error] = db_.prepare(delete_kv_sql);
+		auto kv_stmt_result = db_.prepare(delete_kv_sql);
+		auto kv_stmt = kv_stmt_result.value_or(nullptr);
 		if (kv_stmt)
 		{
 			kv_stmt->bind_text(1, key);
@@ -1501,11 +1534,11 @@ auto SQLiteAdapter::purge_expired_messages(void) -> std::tuple<int32_t, std::opt
 		}
 	}
 
-	auto [commit_ok2, commit_error2] = db_.commit();
-	if (!commit_ok2)
+	auto commit_result2 = db_.commit();
+	if (!commit_result2)
 	{
 		db_.rollback();
-		return { 0, commit_error2 };
+		return { 0, commit_result2.error() };
 	}
 
 	return { static_cast<int32_t>(expired_keys.size()), std::nullopt };
@@ -1520,10 +1553,10 @@ auto SQLiteAdapter::purge_dlq_messages(const std::string& queue, int64_t older_t
 		return { 0, "database is not open" };
 	}
 
-	auto [tx_ok, tx_error] = db_.begin_transaction();
-	if (!tx_ok)
+	auto tx_result = db_.begin_transaction();
+	if (!tx_result)
 	{
-		return { 0, tx_error };
+		return { 0, tx_result.error() };
 	}
 
 	// DLQ entries with a recorded dlq_at at or before the cutoff are past retention. (D-07)
@@ -1532,13 +1565,14 @@ auto SQLiteAdapter::purge_dlq_messages(const std::string& queue, int64_t older_t
 		sqlite_config_.message_index_table
 	);
 
-	auto [select_stmt, select_error] = db_.prepare(select_sql);
-	if (!select_stmt)
+	auto select_stmt_result = db_.prepare(select_sql);
+	if (!select_stmt_result)
 	{
 		db_.rollback();
-		return { 0, select_error };
+		return { 0, select_stmt_result.error() };
 	}
 
+	auto select_stmt = *select_stmt_result;
 	select_stmt->bind_text(1, queue);
 	select_stmt->bind_int64(2, older_than_ms);
 
@@ -1559,13 +1593,14 @@ auto SQLiteAdapter::purge_dlq_messages(const std::string& queue, int64_t older_t
 		sqlite_config_.message_index_table
 	);
 
-	auto [del_stmt, del_error] = db_.prepare(delete_idx_sql);
-	if (!del_stmt)
+	auto del_stmt_result = db_.prepare(delete_idx_sql);
+	if (!del_stmt_result)
 	{
 		db_.rollback();
-		return { 0, del_error };
+		return { 0, del_stmt_result.error() };
 	}
 
+	auto del_stmt = *del_stmt_result;
 	del_stmt->bind_text(1, queue);
 	del_stmt->bind_int64(2, older_than_ms);
 
@@ -1582,7 +1617,8 @@ auto SQLiteAdapter::purge_dlq_messages(const std::string& queue, int64_t older_t
 			sqlite_config_.kv_table
 		);
 
-		auto [kv_stmt, kv_error] = db_.prepare(delete_kv_sql);
+		auto kv_stmt_result = db_.prepare(delete_kv_sql);
+		auto kv_stmt = kv_stmt_result.value_or(nullptr);
 		if (kv_stmt)
 		{
 			kv_stmt->bind_text(1, key);
@@ -1590,11 +1626,11 @@ auto SQLiteAdapter::purge_dlq_messages(const std::string& queue, int64_t older_t
 		}
 	}
 
-	auto [commit_ok, commit_error] = db_.commit();
-	if (!commit_ok)
+	auto commit_result = db_.commit();
+	if (!commit_result)
 	{
 		db_.rollback();
-		return { 0, commit_error };
+		return { 0, commit_result.error() };
 	}
 
 	return { static_cast<int32_t>(keys.size()), std::nullopt };

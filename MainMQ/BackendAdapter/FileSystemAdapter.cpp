@@ -988,12 +988,12 @@ auto FileSystemAdapter::atomic_write(const std::string& target_path, const std::
 	// Write the temp file durably and verify every step. If the write cannot complete
 	// (e.g. ENOSPC on a full flash), abort WITHOUT renaming: a partial temp must never be
 	// promoted over a valid target. The original file is left untouched. (Defect D-02)
-	auto [write_ok, write_error] = write_file_durable(temp_path, content);
-	if (!write_ok)
+	auto write_result = write_file_durable(temp_path, content);
+	if (!write_result)
 	{
 		std::error_code ec;
 		std::filesystem::remove(temp_path, ec);
-		return { false, write_error };
+		return { false, write_result.error() };
 	}
 
 	std::error_code ec;

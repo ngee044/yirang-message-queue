@@ -101,7 +101,7 @@ auto cmd_publish(ArgumentParser& args, Configurations& config) -> int
 		payload["targetConsumerId"] = target;
 	}
 
-	auto [ok, response] = MailboxIPC::send_request(
+	auto result = MailboxIPC::send_request(
 		config.mailbox_config(),
 		config.client_id(),
 		"publish",
@@ -109,11 +109,13 @@ auto cmd_publish(ArgumentParser& args, Configurations& config) -> int
 		config.timeout_ms()
 	);
 
-	if (!ok)
+	if (!result)
 	{
-		Logger::handle().write(LogTypes::Error, std::format("Request failed: {}", response.dump(2)));
+		Logger::handle().write(LogTypes::Error, std::format("Request failed: {}", result.error()));
 		return 1;
 	}
+
+	const auto& response = result.value();
 
 	if (response.value("ok", false))
 	{
@@ -149,7 +151,7 @@ auto cmd_status(ArgumentParser& args, Configurations& config) -> int
 	json payload;
 	payload["queue"] = queue;
 
-	auto [ok, response] = MailboxIPC::send_request(
+	auto result = MailboxIPC::send_request(
 		config.mailbox_config(),
 		config.client_id(),
 		"status",
@@ -157,11 +159,13 @@ auto cmd_status(ArgumentParser& args, Configurations& config) -> int
 		config.timeout_ms()
 	);
 
-	if (!ok)
+	if (!result)
 	{
-		Logger::handle().write(LogTypes::Error, std::format("Request failed: {}", response.dump(2)));
+		Logger::handle().write(LogTypes::Error, std::format("Request failed: {}", result.error()));
 		return 1;
 	}
+
+	const auto& response = result.value();
 
 	if (response.value("ok", false))
 	{
@@ -188,7 +192,7 @@ auto cmd_health(Configurations& config) -> int
 {
 	json payload;
 
-	auto [ok, response] = MailboxIPC::send_request(
+	auto result = MailboxIPC::send_request(
 		config.mailbox_config(),
 		config.client_id(),
 		"health",
@@ -196,11 +200,13 @@ auto cmd_health(Configurations& config) -> int
 		config.timeout_ms()
 	);
 
-	if (!ok)
+	if (!result)
 	{
-		Logger::handle().write(LogTypes::Error, std::format("Request failed: {}", response.dump(2)));
+		Logger::handle().write(LogTypes::Error, std::format("Request failed: {}", result.error()));
 		return 1;
 	}
+
+	const auto& response = result.value();
 
 	if (response.value("ok", false))
 	{
@@ -227,7 +233,7 @@ auto cmd_metrics(Configurations& config) -> int
 {
 	json payload;
 
-	auto [ok, response] = MailboxIPC::send_request(
+	auto result = MailboxIPC::send_request(
 		config.mailbox_config(),
 		config.client_id(),
 		"metrics",
@@ -235,11 +241,13 @@ auto cmd_metrics(Configurations& config) -> int
 		config.timeout_ms()
 	);
 
-	if (!ok)
+	if (!result)
 	{
-		Logger::handle().write(LogTypes::Error, std::format("Request failed: {}", response.dump(2)));
+		Logger::handle().write(LogTypes::Error, std::format("Request failed: {}", result.error()));
 		return 1;
 	}
+
+	const auto& response = result.value();
 
 	if (response.value("ok", false))
 	{

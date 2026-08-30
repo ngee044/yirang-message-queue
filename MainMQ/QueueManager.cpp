@@ -6,6 +6,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <expected>
 #include <format>
 #include <utility>
 #include <vector>
@@ -50,10 +51,10 @@ auto QueueManager::start(void) -> std::tuple<bool, std::optional<std::string>>
 		));
 	}
 
-	auto [started, start_error] = thread_pool_->start();
-	if (!started)
+	auto start_result = thread_pool_->start();
+	if (!start_result)
 	{
-		return { false, start_error };
+		return { false, start_result.error() };
 	}
 
 	running_.store(true);
@@ -114,11 +115,11 @@ auto QueueManager::get_policy(const std::string& queue_name) -> std::optional<Qu
 	return std::nullopt;
 }
 
-auto QueueManager::queue_manager_lease_job(void) -> std::tuple<bool, std::optional<std::string>>
+auto QueueManager::queue_manager_lease_job(void) -> std::expected<void, std::string>
 {
 	if (!running_.load())
 	{
-		return { true, std::nullopt };
+		return {};
 	}
 
 	recover_expired_leases();
@@ -127,14 +128,14 @@ auto QueueManager::queue_manager_lease_job(void) -> std::tuple<bool, std::option
 	wait_next_sweep(config_.lease_sweep_interval_ms);
 	push_lease_job();
 
-	return { true, std::nullopt };
+	return {};
 }
 
-auto QueueManager::queue_manager_retry_job(void) -> std::tuple<bool, std::optional<std::string>>
+auto QueueManager::queue_manager_retry_job(void) -> std::expected<void, std::string>
 {
 	if (!running_.load())
 	{
-		return { true, std::nullopt };
+		return {};
 	}
 
 	process_delayed_messages();
@@ -142,14 +143,14 @@ auto QueueManager::queue_manager_retry_job(void) -> std::tuple<bool, std::option
 	wait_next_sweep(config_.retry_sweep_interval_ms);
 	push_retry_job();
 
-	return { true, std::nullopt };
+	return {};
 }
 
-auto QueueManager::queue_manager_ttl_job(void) -> std::tuple<bool, std::optional<std::string>>
+auto QueueManager::queue_manager_ttl_job(void) -> std::expected<void, std::string>
 {
 	if (!running_.load())
 	{
-		return { true, std::nullopt };
+		return {};
 	}
 
 	purge_expired_messages();
@@ -158,14 +159,14 @@ auto QueueManager::queue_manager_ttl_job(void) -> std::tuple<bool, std::optional
 	wait_next_sweep(config_.ttl_sweep_interval_ms);
 	push_ttl_job();
 
-	return { true, std::nullopt };
+	return {};
 }
 
 auto QueueManager::push_lease_job(void) -> void
 {
 	push_sweep_job(std::make_shared<Thread::Job>(
 		Thread::JobPriorities::LongTerm,
-		[this]() -> std::tuple<bool, std::optional<std::string>> { return queue_manager_lease_job(); },
+		[this]() -> std::expected<void, std::string> { return queue_manager_lease_job(); },
 		"queue_manager_lease_job"
 	));
 }
@@ -174,7 +175,7 @@ auto QueueManager::push_retry_job(void) -> void
 {
 	push_sweep_job(std::make_shared<Thread::Job>(
 		Thread::JobPriorities::LongTerm,
-		[this]() -> std::tuple<bool, std::optional<std::string>> { return queue_manager_retry_job(); },
+		[this]() -> std::expected<void, std::string> { return queue_manager_retry_job(); },
 		"queue_manager_retry_job"
 	));
 }
@@ -183,15 +184,15 @@ auto QueueManager::push_ttl_job(void) -> void
 {
 	push_sweep_job(std::make_shared<Thread::Job>(
 		Thread::JobPriorities::LongTerm,
-		[this]() -> std::tuple<bool, std::optional<std::string>> { return queue_manager_ttl_job(); },
+		[this]() -> std::expected<void, std::string> { return queue_manager_ttl_job(); },
 		"queue_manager_ttl_job"
 	));
 }
 
 auto QueueManager::push_sweep_job(std::shared_ptr<Thread::Job> job) -> void
 {
-	auto [pushed, error] = thread_pool_->push(job);
-	if (pushed)
+	auto push_result = thread_pool_->push(job);
+	if (push_result)
 	{
 		return;
 	}
@@ -202,7 +203,7 @@ auto QueueManager::push_sweep_job(std::shared_ptr<Thread::Job> job) -> void
 	{
 		Logger::handle().write(
 			LogTypes::Error,
-			std::format("Failed to re-arm sweep job {}: {}", job->title(), error.value_or("unknown"))
+			std::format("Failed to re-arm sweep job {}: {}", job->title(), push_result.error())
 		);
 	}
 }

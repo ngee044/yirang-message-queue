@@ -33,20 +33,16 @@ namespace Demo
 	{
 		CallResult result;
 
-		auto [sent, response] = MailboxIPC::send_request(config_, client_id_, command, payload, config_.timeout_ms);
+		auto send_result = MailboxIPC::send_request(config_, client_id_, command, payload, config_.timeout_ms);
 
-		if (!sent)
+		if (!send_result)
 		{
-			std::string detail = response.dump();
-			if (response.contains("error") && response["error"].is_string())
-			{
-				detail = response["error"].get<std::string>();
-			}
-
-			result.error = std::format("TRANSPORT: {}", detail);
+			result.error = std::format("TRANSPORT: {}", send_result.error());
 
 			return result;
 		}
+
+		const auto& response = send_result.value();
 
 		if (!response.value("ok", false))
 		{

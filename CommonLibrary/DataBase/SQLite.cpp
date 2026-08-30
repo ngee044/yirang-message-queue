@@ -2,6 +2,7 @@
 
 #include <sqlite3.h>
 
+#include <expected>
 #include <format>
 #include <utility>
 
@@ -60,132 +61,132 @@ namespace DataBase
 		return sqlite3_step(statement_);
 	}
 
-	auto SQLiteStatement::reset(void) -> std::tuple<bool, std::optional<std::string>>
+	auto SQLiteStatement::reset(void) -> std::expected<void, std::string>
 	{
 		if (statement_ == nullptr)
 		{
-			return { false, "statement is null" };
+			return std::unexpected("statement is null");
 		}
 
 		auto result = sqlite3_reset(statement_);
 		if (result != SQLITE_OK)
 		{
-			return { false, error_message("cannot reset statement") };
+			return std::unexpected(error_message("cannot reset statement"));
 		}
 
-		return { true, std::nullopt };
+		return {};
 	}
 
-	auto SQLiteStatement::clear_bindings(void) -> std::tuple<bool, std::optional<std::string>>
+	auto SQLiteStatement::clear_bindings(void) -> std::expected<void, std::string>
 	{
 		if (statement_ == nullptr)
 		{
-			return { false, "statement is null" };
+			return std::unexpected("statement is null");
 		}
 
 		auto result = sqlite3_clear_bindings(statement_);
 		if (result != SQLITE_OK)
 		{
-			return { false, error_message("cannot clear bindings") };
+			return std::unexpected(error_message("cannot clear bindings"));
 		}
 
-		return { true, std::nullopt };
+		return {};
 	}
 
-	auto SQLiteStatement::bind_int(const int& index, const int& value) -> std::tuple<bool, std::optional<std::string>>
+	auto SQLiteStatement::bind_int(const int& index, const int& value) -> std::expected<void, std::string>
 	{
 		if (statement_ == nullptr)
 		{
-			return { false, "statement is null" };
+			return std::unexpected("statement is null");
 		}
 
 		auto result = sqlite3_bind_int(statement_, index, value);
 		if (result != SQLITE_OK)
 		{
-			return { false, error_message("cannot bind int") };
+			return std::unexpected(error_message("cannot bind int"));
 		}
 
-		return { true, std::nullopt };
+		return {};
 	}
 
-	auto SQLiteStatement::bind_int64(const int& index, const int64_t& value) -> std::tuple<bool, std::optional<std::string>>
+	auto SQLiteStatement::bind_int64(const int& index, const int64_t& value) -> std::expected<void, std::string>
 	{
 		if (statement_ == nullptr)
 		{
-			return { false, "statement is null" };
+			return std::unexpected("statement is null");
 		}
 
 		auto result = sqlite3_bind_int64(statement_, index, value);
 		if (result != SQLITE_OK)
 		{
-			return { false, error_message("cannot bind int64") };
+			return std::unexpected(error_message("cannot bind int64"));
 		}
 
-		return { true, std::nullopt };
+		return {};
 	}
 
-	auto SQLiteStatement::bind_double(const int& index, const double& value) -> std::tuple<bool, std::optional<std::string>>
+	auto SQLiteStatement::bind_double(const int& index, const double& value) -> std::expected<void, std::string>
 	{
 		if (statement_ == nullptr)
 		{
-			return { false, "statement is null" };
+			return std::unexpected("statement is null");
 		}
 
 		auto result = sqlite3_bind_double(statement_, index, value);
 		if (result != SQLITE_OK)
 		{
-			return { false, error_message("cannot bind double") };
+			return std::unexpected(error_message("cannot bind double"));
 		}
 
-		return { true, std::nullopt };
+		return {};
 	}
 
-	auto SQLiteStatement::bind_text(const int& index, const std::string& value) -> std::tuple<bool, std::optional<std::string>>
+	auto SQLiteStatement::bind_text(const int& index, const std::string& value) -> std::expected<void, std::string>
 	{
 		if (statement_ == nullptr)
 		{
-			return { false, "statement is null" };
+			return std::unexpected("statement is null");
 		}
 
 		auto result = sqlite3_bind_text(statement_, index, value.c_str(), static_cast<int>(value.size()), SQLITE_TRANSIENT);
 		if (result != SQLITE_OK)
 		{
-			return { false, error_message("cannot bind text") };
+			return std::unexpected(error_message("cannot bind text"));
 		}
 
-		return { true, std::nullopt };
+		return {};
 	}
 
-	auto SQLiteStatement::bind_blob(const int& index, const std::vector<uint8_t>& value) -> std::tuple<bool, std::optional<std::string>>
+	auto SQLiteStatement::bind_blob(const int& index, const std::vector<uint8_t>& value) -> std::expected<void, std::string>
 	{
 		if (statement_ == nullptr)
 		{
-			return { false, "statement is null" };
+			return std::unexpected("statement is null");
 		}
 
 		auto result = sqlite3_bind_blob(statement_, index, value.data(), static_cast<int>(value.size()), SQLITE_TRANSIENT);
 		if (result != SQLITE_OK)
 		{
-			return { false, error_message("cannot bind blob") };
+			return std::unexpected(error_message("cannot bind blob"));
 		}
 
-		return { true, std::nullopt };
+		return {};
 	}
 
-	auto SQLiteStatement::bind_null(const int& index) -> std::tuple<bool, std::optional<std::string>>
+	auto SQLiteStatement::bind_null(const int& index) -> std::expected<void, std::string>
 	{
 		if (statement_ == nullptr)
 		{
-			return { false, "statement is null" };
+			return std::unexpected("statement is null");
 		}
 
 		auto result = sqlite3_bind_null(statement_, index);
 		if (result != SQLITE_OK)
 		{
-			return { false, error_message("cannot bind null") };
+			return std::unexpected(error_message("cannot bind null"));
 		}
 
-		return { true, std::nullopt };
+		return {};
 	}
 
 	auto SQLiteStatement::column_count(void) const -> int
@@ -309,18 +310,18 @@ namespace DataBase
 
 	SQLite::~SQLite(void) { close(); }
 
-	auto SQLite::open(const std::string& path) -> std::tuple<bool, std::optional<std::string>>
+	auto SQLite::open(const std::string& path) -> std::expected<void, std::string>
 	{
 		return open(path, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE);
 	}
 
-	auto SQLite::open(const std::string& path, const int& flags) -> std::tuple<bool, std::optional<std::string>>
+	auto SQLite::open(const std::string& path, const int& flags) -> std::expected<void, std::string>
 	{
 		close();
 
 		if (path.empty())
 		{
-			return { false, "db path is empty" };
+			return std::unexpected("db path is empty");
 		}
 
 		sqlite3* db_handle = nullptr;
@@ -334,11 +335,11 @@ namespace DataBase
 				sqlite3_close_v2(db_handle);
 			}
 
-			return { false, message.empty() ? "cannot open database" : message };
+			return std::unexpected(message.empty() ? "cannot open database" : message);
 		}
 
 		handle_ = db_handle;
-		return { true, std::nullopt };
+		return {};
 	}
 
 	auto SQLite::close(void) -> void
@@ -356,27 +357,27 @@ namespace DataBase
 
 	auto SQLite::handle(void) const -> sqlite3* { return handle_; }
 
-	auto SQLite::set_busy_timeout(const int& timeout_ms) -> std::tuple<bool, std::optional<std::string>>
+	auto SQLite::set_busy_timeout(const int& timeout_ms) -> std::expected<void, std::string>
 	{
 		if (handle_ == nullptr)
 		{
-			return { false, "database is not open" };
+			return std::unexpected("database is not open");
 		}
 
 		auto result = sqlite3_busy_timeout(handle_, timeout_ms);
 		if (result != SQLITE_OK)
 		{
-			return { false, error_message("cannot set busy timeout") };
+			return std::unexpected(error_message("cannot set busy timeout"));
 		}
 
-		return { true, std::nullopt };
+		return {};
 	}
 
-	auto SQLite::execute(const std::string& sql) -> std::tuple<bool, std::optional<std::string>>
+	auto SQLite::execute(const std::string& sql) -> std::expected<void, std::string>
 	{
 		if (handle_ == nullptr)
 		{
-			return { false, "database is not open" };
+			return std::unexpected("database is not open");
 		}
 
 		char* error_message_ptr = nullptr;
@@ -390,26 +391,28 @@ namespace DataBase
 				sqlite3_free(error_message_ptr);
 			}
 
-			return { false, message };
+			return std::unexpected(message);
 		}
 
-		return { true, std::nullopt };
+		return {};
 	}
 
 	auto SQLite::ensure_column(const std::string& table, const std::string& column, const std::string& declaration)
-		-> std::tuple<bool, std::optional<std::string>>
+		-> std::expected<void, std::string>
 	{
 		if (handle_ == nullptr)
 		{
-			return { false, "database is not open" };
+			return std::unexpected("database is not open");
 		}
 
 		// PRAGMA arguments cannot be bound; the table name comes from config, never from a payload.
-		auto [info_statement, info_error] = prepare(std::format("PRAGMA table_info({});", table));
-		if (!info_statement)
+		auto statement_result = prepare(std::format("PRAGMA table_info({});", table));
+		if (!statement_result)
 		{
-			return { false, info_error };
+			return std::unexpected(statement_result.error());
 		}
+
+		const auto& info_statement = *statement_result;
 
 		int step_result = SQLITE_OK;
 		while ((step_result = info_statement->step()) == SQLITE_ROW)
@@ -417,7 +420,7 @@ namespace DataBase
 			// table_info columns: cid(0), name(1), type(2), notnull(3), dflt_value(4), pk(5)
 			if (info_statement->column_text(1) == column)
 			{
-				return { true, std::nullopt };
+				return {};
 			}
 		}
 
@@ -425,17 +428,17 @@ namespace DataBase
 		// would run ALTER anyway and report "duplicate column name" instead of the real cause.
 		if (step_result != SQLITE_DONE)
 		{
-			return { false, std::format("cannot read columns of {} (step={})", table, step_result) };
+			return std::unexpected(std::format("cannot read columns of {} (step={})", table, step_result));
 		}
 
 		return execute(std::format("ALTER TABLE {} ADD COLUMN {} {};", table, column, declaration));
 	}
 
-	auto SQLite::query(const std::string& sql) -> std::tuple<std::optional<QueryResult>, std::optional<std::string>>
+	auto SQLite::query(const std::string& sql) -> std::expected<QueryResult, std::string>
 	{
 		if (handle_ == nullptr)
 		{
-			return { std::nullopt, "database is not open" };
+			return std::unexpected("database is not open");
 		}
 
 		QueryContext context;
@@ -450,40 +453,40 @@ namespace DataBase
 				sqlite3_free(error_message_ptr);
 			}
 
-			return { std::nullopt, message };
+			return std::unexpected(message);
 		}
 
-		return { context.result, std::nullopt };
+		return context.result;
 	}
 
-	auto SQLite::prepare(const std::string& sql) -> std::tuple<std::shared_ptr<SQLiteStatement>, std::optional<std::string>>
+	auto SQLite::prepare(const std::string& sql) -> std::expected<std::shared_ptr<SQLiteStatement>, std::string>
 	{
 		if (handle_ == nullptr)
 		{
-			return { nullptr, "database is not open" };
+			return std::unexpected("database is not open");
 		}
 
 		sqlite3_stmt* statement = nullptr;
 		auto result = sqlite3_prepare_v2(handle_, sql.c_str(), -1, &statement, nullptr);
 		if (result != SQLITE_OK)
 		{
-			return { nullptr, error_message("cannot prepare statement") };
+			return std::unexpected(error_message("cannot prepare statement"));
 		}
 
-		return { std::make_shared<SQLiteStatement>(handle_, statement), std::nullopt };
+		return std::make_shared<SQLiteStatement>(handle_, statement);
 	}
 
-	auto SQLite::begin_transaction(void) -> std::tuple<bool, std::optional<std::string>>
+	auto SQLite::begin_transaction(void) -> std::expected<void, std::string>
 	{
 		return execute("BEGIN IMMEDIATE;");
 	}
 
-	auto SQLite::commit(void) -> std::tuple<bool, std::optional<std::string>>
+	auto SQLite::commit(void) -> std::expected<void, std::string>
 	{
 		return execute("COMMIT;");
 	}
 
-	auto SQLite::rollback(void) -> std::tuple<bool, std::optional<std::string>>
+	auto SQLite::rollback(void) -> std::expected<void, std::string>
 	{
 		return execute("ROLLBACK;");
 	}

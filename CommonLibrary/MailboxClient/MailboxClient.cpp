@@ -5,6 +5,7 @@
 #include "Logger.h"
 
 #include <chrono>
+#include <expected>
 #include <filesystem>
 #include <format>
 #include <fstream>
@@ -31,14 +32,14 @@ auto atomic_write(const std::string& target_path, const std::string& content) ->
 	// Durable, fail-closed write: on any failure (e.g. ENOSPC) abort before rename so a
 	// partial temp is never promoted over a valid target. (Defect D-02, sibling of the
 	// FileSystemAdapter fix.)
-	auto [write_ok, write_error] = write_file_durable(temp_path, content);
-	if (!write_ok)
+	auto write_result = write_file_durable(temp_path, content);
+	if (!write_result)
 	{
 		std::error_code rm_ec;
 		std::filesystem::remove(temp_path, rm_ec);
 		Logger::handle().write(
 			LogTypes::Error,
-			std::format("Durable write failed: {}", write_error.value_or("unknown"))
+			std::format("Durable write failed: {}", write_result.error())
 		);
 		return false;
 	}
@@ -66,7 +67,7 @@ auto send_request(
 	const std::string& command,
 	const json& payload,
 	int32_t timeout_ms
-) -> std::tuple<bool, json>
+) -> std::expected<json, std::string>
 {
 	auto request_id = Generator::guid();
 	auto now = current_time_ms();
@@ -97,7 +98,7 @@ auto send_request(
 	auto request_file = (requests_path / std::format("{}.json", request_id)).string();
 	if (!atomic_write(request_file, request.dump(2)))
 	{
-		return { false, { { "error", "failed to write request" } } };
+		return std::unexpected("failed to write request");
 	}
 
 	// Wait for response
@@ -120,11 +121,11 @@ auto send_request(
 
 				try
 				{
-					return { true, json::parse(content) };
+					return json::parse(content);
 				}
 				catch (const json::exception& e)
 				{
-					return { false, { { "error", std::format("response parse error: {}", e.what()) } } };
+					return std::unexpected(std::format("response parse error: {}", e.what()));
 				}
 			}
 		}
@@ -137,7 +138,7 @@ auto send_request(
 	// in that case. If the daemon already moved it to processing, this is a harmless no-op. (D-15)
 	std::filesystem::remove(request_file, ec);
 
-	return { false, { { "error", "timeout waiting for response" } } };
+	return std::unexpected("timeout waiting for response");
 }
 
 } // namespace MailboxIPC

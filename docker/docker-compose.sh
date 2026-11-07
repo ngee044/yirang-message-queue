@@ -105,7 +105,26 @@ run_unit_tests() {
 # Host-side wrapper round-trip: verifies that `docker-compose.sh publish` passes a JSON
 # payload through docker-exec + shell layers intact. Regression guard for the default-value
 # brace bug (MESSAGE="${3:-{...}}" appended a stray '}') that broke every wrapper publish.
-run_wrapper_publish_test() {
+run_wrapper_publish_test() (
+    local override_file
+    override_file=$(mktemp) || exit 1
+    export COMPOSE_PROJECT_NAME="ymq-wrapper-$$"
+    export COMPOSE_FILE="$SCRIPT_DIR/docker-compose.yml:$override_file"
+    cat > "$override_file" <<EOF
+services:
+  yirangmq:
+    container_name: $COMPOSE_PROJECT_NAME
+volumes:
+  yirangmq-data:
+    name: $COMPOSE_PROJECT_NAME-data
+  yirangmq-logs:
+    name: $COMPOSE_PROJECT_NAME-logs
+  yirangmq-ipc:
+    name: $COMPOSE_PROJECT_NAME-ipc
+EOF
+    trap 'docker compose down -v >/dev/null 2>&1; rm -f "$override_file"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
     log_info "Phase 3: Wrapper publish round-trip..."
     local marker='wrap-roundtrip-marker'
     # Payload includes braces/quotes inside a string to stress shell quoting.
@@ -120,21 +139,18 @@ run_wrapper_publish_test() {
     pub=$("$0" publish telemetry "$payload" 2>&1)
     if ! echo "$pub" | grep -q 'published successfully'; then
         log_error "Wrapper round-trip: publish did not succeed — $pub"
-        docker compose down -v >/dev/null 2>&1
         exit 1
     fi
 
     local con
     con=$("$0" consume telemetry 2>&1)
-    docker compose down -v >/dev/null 2>&1
-
-    if echo "$con" | grep -q "$marker"; then
+    if echo "$con" | grep -q "$marker" && echo "$con" | grep -Fq '"note": "a{b}c"'; then
         log_info "Wrapper publish round-trip (JSON payload intact): PASS"
     else
         log_error "Wrapper round-trip: payload not delivered intact — $con"
         exit 1
     fi
-}
+)
 
 case "${1:-help}" in
     up)

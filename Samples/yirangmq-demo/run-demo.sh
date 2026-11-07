@@ -5,10 +5,10 @@
 # stdout 을 파싱하지 않으므로 출력 문구가 바뀌어도 판정이 흔들리지 않는다.
 #
 # Usage:
-#   ./run-demo.sh                # 데몬 기동 여부를 스스로 판단해 전체 실행
+#   ./run-demo.sh                # 격리된 임시 데몬으로 전체 실행
 #   ./run-demo.sh --act 3        # 특정 장면만
 #   ./run-demo.sh --attach       # 이미 떠 있는 데몬에 붙는다 (새로 띄우지 않음)
-#   ./run-demo.sh --reset        # 데모 전용 데이터를 지우고 시작
+#   ./run-demo.sh --reset        # 호환 옵션 (기본 실행도 매번 새 임시 데이터 사용)
 #   ./run-demo.sh --bin-dir /app # 실행 파일 위치 지정 (Docker)
 
 set -uo pipefail
@@ -101,14 +101,16 @@ for binary in MainMQ yirangmq-demo-sensor yirangmq-demo-worker yirangmq-demo-mon
 	fi
 done
 
-SENSOR="./yirangmq-demo-sensor"
-WORKER="./yirangmq-demo-worker"
-MONITOR="./yirangmq-demo-monitor"
+SENSOR="$BIN_DIR/yirangmq-demo-sensor"
+WORKER="$BIN_DIR/yirangmq-demo-worker"
+MONITOR="$BIN_DIR/yirangmq-demo-monitor"
 
 DAEMON_PID=""
 WATCH_PID=""
+WORK_DIR=""
+CHILD_PIDS=()
 
-probe_daemon() { $MONITOR once --queue "$QUEUE" --timeout 1500 >/dev/null 2>&1; }
+probe_daemon() { "$MONITOR" once --queue "$QUEUE" --timeout 1500 >/dev/null 2>&1; }
 
 stop_watch()
 {
@@ -121,26 +123,54 @@ stop_watch()
 
 start_watch()
 {
-	$MONITOR watch --queue "$QUEUE" --interval-ms 300 &
+	"$MONITOR" watch --queue "$QUEUE" --interval-ms 300 &
 	WATCH_PID=$!
+}
+
+stop_owned_daemon()
+{
+	if ! kill -0 "$DAEMON_PID" 2>/dev/null; then
+		wait "$DAEMON_PID" 2>/dev/null
+		return 1
+	fi
+	kill -TERM "$DAEMON_PID" 2>/dev/null
+	for _ in $(seq 1 50); do
+		kill -0 "$DAEMON_PID" 2>/dev/null || break
+		sleep 0.1
+	done
+	if kill -0 "$DAEMON_PID" 2>/dev/null; then
+		kill -KILL "$DAEMON_PID" 2>/dev/null
+		wait "$DAEMON_PID" 2>/dev/null
+		return 1
+	fi
+	wait "$DAEMON_PID"
 }
 
 cleanup()
 {
 	local status=$?
 	trap - EXIT INT TERM
-
 	stop_watch
-
+	# Bash 3.2 treats an empty array as unset under nounset.
+	for child in ${CHILD_PIDS[@]+"${CHILD_PIDS[@]}"}; do
+		kill -TERM "$child" 2>/dev/null || true
+		wait "$child" 2>/dev/null || true
+	done
 	if [[ -n "$DAEMON_PID" ]]; then
-		log_info "데몬 종료 (SIGTERM)"
-		kill -TERM "$DAEMON_PID" 2>/dev/null
-		wait "$DAEMON_PID" 2>/dev/null
+		if ! stop_owned_daemon; then
+			log_error "데몬이 제한 시간 안에 정상 종료하지 못했습니다"
+			status=1
+		fi
 	fi
-
-	exit $status
+	if [[ -n "$WORK_DIR" ]]; then
+		cd / || exit 1
+		rm -rf -- "$WORK_DIR"
+	fi
+	exit "$status"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 echo "${CYAN}╔════════════════════════════════════════════════════════════╗${NC}"
 echo "${CYAN}║            Yi-Rang MQ 동작 시연 (run-demo.sh)              ║${NC}"
@@ -149,45 +179,51 @@ log_info "실행 위치 : $BIN_DIR"
 log_info "IPC 루트  : $BIN_DIR/ipc"
 log_info "대상 큐   : $QUEUE"
 
-# ── 데몬 준비 ────────────────────────────────────────────────────────────────
-if probe_daemon; then
-	log_info "이미 응답하는 데몬이 있어 그대로 사용합니다"
-	log_warn "이전 실습 메시지가 큐에 남아 있으면 장면 판정이 흔들릴 수 있습니다"
-else
-	if [[ "$ATTACH" == true ]]; then
-		log_error "--attach 를 주었으나 응답하는 데몬이 없습니다"
+# 자동 검증은 외부 데몬이나 데이터 경로를 인수하지 않는다.
+if [[ ! "$QUEUE" =~ ^[a-zA-Z0-9_-]+$ || ${#QUEUE} -gt 256 ]]; then
+	log_error "잘못된 큐 이름입니다"
+	exit 2
+fi
+if [[ "$ATTACH" == true ]]; then
+	if [[ "$RESET" == true ]] || ! probe_daemon; then
+		log_error "--attach 는 실행 중인 데몬이 필요하며 --reset 과 함께 쓸 수 없습니다"
 		exit 2
 	fi
-
-	if [[ "$RESET" == true ]]; then
-		log_info "데모 전용 데이터를 삭제합니다"
-		rm -rf ./data/demo ./data/demo.db ./data/demo.db-wal ./data/demo.db-shm
-	fi
-
-	mkdir -p ./data/demo
-
-	# 데모 전용 DB 로 띄워 사용자의 기존 데이터를 건드리지 않는다. 데몬에는 --ipc-root
-	# 옵션이 없으므로 IPC 루트는 ./ipc 를 그대로 쓴다.
-	log_info "데몬을 기동합니다 (--db-path ./data/demo.db, 콘솔 로그 끔)"
-	./MainMQ --db-path ./data/demo.db --data-root ./data/demo --log-root ./logs --write-console-log 0 &
+else
+	WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/yirangmq-demo.XXXXXX") || exit 1
+	cp "$BIN_DIR/MainMQ" "$BIN_DIR/sqlite_schema.sql" "$WORK_DIR/" || exit 1
+	cat > "$WORK_DIR/main_mq_configuration.json" <<EOF
+{
+  "backend": "sqlite",
+  "ipc": {"root": "./ipc", "useFolderWatcher": true, "pollIntervalMs": 50},
+  "sqlite": {"dbPath": "./data/demo.db", "schemaPath": "./sqlite_schema.sql"},
+  "queues": [{
+    "name": "$QUEUE",
+    "policy": {"retry": {"limit": 5, "backoff": "fixed", "initialDelaySec": 1, "maxDelaySec": 1}},
+    "messageSchema": {"name": "Demo", "rules": [{"field": "deviceId", "type": "required"}]}
+  }]
+}
+EOF
+	cd "$WORK_DIR" || exit 1
+	./MainMQ --write-console-log 0 --write-file-log 0 &
 	DAEMON_PID=$!
-
 	READY=false
 	for _ in $(seq 1 40); do
+		kill -0 "$DAEMON_PID" 2>/dev/null || break
 		if probe_daemon; then READY=true; break; fi
-		sleep 0.25
+		sleep 0.1
 	done
-
 	if [[ "$READY" != true ]]; then
-		log_error "데몬이 응답하지 않습니다"
+		log_error "격리된 데몬이 응답하지 않습니다"
 		exit 1
 	fi
-
-	# 장면 합격 수에 섞이지 않도록 정보 로그로 남긴다.
-	log_info "데몬 기동 완료 (PID $DAEMON_PID)"
+	log_info "격리된 실행 위치 : $WORK_DIR"
 fi
 
-$MONITOR once --queue "$QUEUE"
+if ! "$MONITOR" check-empty --queue "$QUEUE"; then
+	log_error "등록된 빈 큐가 필요합니다. --attach 대상의 기존 메시지는 변경하지 않습니다"
+	exit 1
+fi
 
 want_act() { [[ -z "$ONLY_ACT" || "$ONLY_ACT" == "$1" ]]; }
 
@@ -196,19 +232,19 @@ act_1()
 {
 	scene "장면 1 — 센서가 발행하고 워커가 처리한다"
 
-	$SENSOR --queue "$QUEUE" --count 3 --interval-ms 200 || { log_fail "장면 1: 발행 실패"; return; }
+	"$SENSOR" --queue "$QUEUE" --count 3 --interval-ms 200 || { log_fail "장면 1: 발행 실패"; return; }
 
-	if ! $MONITOR wait --queue "$QUEUE" --state ready --count 3 --timeout-ms 10000; then
+	if ! "$MONITOR" wait --queue "$QUEUE" --state ready --count 3 --timeout-ms 10000; then
 		log_fail "장면 1: ready 3건이 되지 않았습니다"
 		return
 	fi
 
-	if ! $WORKER --queue "$QUEUE" --consumer-id demo-worker-01 --max-messages 3 --idle-exit-ms 5000; then
+	if ! "$WORKER" --queue "$QUEUE" --consumer-id demo-worker-01 --max-messages 3 --expect-messages 3 --idle-exit-ms 5000; then
 		log_fail "장면 1: 워커가 예상 외 결과로 종료했습니다"
 		return
 	fi
 
-	if ! $MONITOR wait --queue "$QUEUE" --state ready --max 0 --timeout-ms 5000; then
+	if ! "$MONITOR" check-empty --queue "$QUEUE"; then
 		log_fail "장면 1: 큐가 비워지지 않았습니다"
 		return
 	fi
@@ -223,12 +259,12 @@ act_2()
 
 	log_info "deviceId 를 뺀 프레임을 일부러 발행합니다 (telemetry 스키마의 필수 필드)"
 
-	if ! $SENSOR --queue "$QUEUE" --count 1 --bad-frame 0; then
+	if ! "$SENSOR" --queue "$QUEUE" --count 1 --bad-frame 0; then
 		log_fail "장면 2: 거부되어야 할 프레임이 통과했습니다"
 		return
 	fi
 
-	if ! $MONITOR wait --queue "$QUEUE" --state ready --max 0 --timeout-ms 3000; then
+	if ! "$MONITOR" check-empty --queue "$QUEUE"; then
 		log_fail "장면 2: 거부된 프레임이 큐에 적재되었습니다"
 		return
 	fi
@@ -241,18 +277,19 @@ act_3()
 {
 	scene "장면 3 — 처리 중 멈춘 워커의 메시지가 다른 워커에게 넘어간다"
 
-	$SENSOR --queue "$QUEUE" --count 1 || { log_fail "장면 3: 발행 실패"; return; }
+	"$SENSOR" --queue "$QUEUE" --count 1 || { log_fail "장면 3: 발행 실패"; return; }
 
 	log_info "worker-01 이 가시성 2초로 소비한 뒤 6초 멈춥니다"
 	start_watch
 
-	$WORKER --queue "$QUEUE" --consumer-id demo-worker-01 --visibility 2 --stall-ms 6000 \
-		--max-messages 1 --idle-exit-ms 15000 &
+	"$WORKER" --queue "$QUEUE" --consumer-id demo-worker-01 --visibility 2 --stall-ms 6000 \
+		--max-messages 1 --expect-messages 1 --idle-exit-ms 15000 &
 	local stalled_pid=$!
+	CHILD_PIDS+=("$stalled_pid")
 
 	# 대기 워커는 worker-01 이 lease 를 잡은 뒤에 띄운다. 그래야 누가 먼저 집을지에
 	# 대한 경쟁이 사라지고 장면이 결정적으로 재현된다.
-	if ! $MONITOR wait --queue "$QUEUE" --state inflight --count 1 --timeout-ms 15000; then
+	if ! "$MONITOR" wait --queue "$QUEUE" --state inflight --count 1 --timeout-ms 15000; then
 		stop_watch
 		kill "$stalled_pid" 2>/dev/null
 		log_fail "장면 3: worker-01 이 lease 를 잡지 못했습니다"
@@ -260,12 +297,14 @@ act_3()
 	fi
 
 	log_info "이제 대기 워커를 띄웁니다 — lease 가 만료되면 이쪽이 이어받아야 합니다"
-	$WORKER --queue "$QUEUE" --consumer-id demo-worker-standby --visibility 15 \
-		--max-messages 1 --idle-exit-ms 15000 &
+	"$WORKER" --queue "$QUEUE" --consumer-id demo-worker-standby --visibility 15 \
+		--max-messages 1 --expect-messages 1 --idle-exit-ms 15000 &
 	local standby_pid=$!
+	CHILD_PIDS+=("$standby_pid")
 
 	wait "$stalled_pid"; local stalled_rc=$?
 	wait "$standby_pid"; local standby_rc=$?
+	CHILD_PIDS=()
 
 	stop_watch
 
@@ -279,7 +318,7 @@ act_3()
 		return
 	fi
 
-	if ! $MONITOR wait --queue "$QUEUE" --state ready --max 0 --timeout-ms 5000; then
+	if ! "$MONITOR" check-empty --queue "$QUEUE"; then
 		log_fail "장면 3: 메시지가 정산되지 않고 큐에 남았습니다"
 		return
 	fi
@@ -287,94 +326,69 @@ act_3()
 	log_pass "장면 3: 재배달로 대기 워커가 처리하고, 늦은 ack 은 거부되었습니다"
 }
 
+prepare_dlq()
+{
+	"$SENSOR" --queue "$QUEUE" --count 1 --fault-frame 0 || return 1
+	"$WORKER" --queue "$QUEUE" --consumer-id demo-worker-01 --max-messages 5 --idle-exit-ms 4000 || return 1
+	"$MONITOR" wait --queue "$QUEUE" --state dlq --count 1 --max 1 --timeout-ms 5000 || return 1
+	"$MONITOR" dlq --queue "$QUEUE" || return 1
+}
+
+settle_dlq()
+{
+	"$MONITOR" reprocess --queue "$QUEUE" --first || return 1
+	"$WORKER" --queue "$QUEUE" --consumer-id demo-worker-01 --ignore-fault \
+		--max-messages 1 --expect-messages 1 --idle-exit-ms 5000 || return 1
+	"$MONITOR" check-empty --queue "$QUEUE"
+}
+
 # ── 장면 4: 재시도 소진 → DLQ ────────────────────────────────────────────────
 act_4()
 {
 	scene "장면 4 — 반복 실패한 메시지는 DLQ 로 격리된다"
-
-	log_info "워커가 처리 불가로 판정할 fault 프레임을 발행합니다"
-
-	$SENSOR --queue "$QUEUE" --count 1 --fault-frame 0 || { log_fail "장면 4: 발행 실패"; return; }
-
-	log_info "워커가 nack requeue=true 로 재시도를 요청하고, 정책 한도에 닿으면 데몬이 DLQ 로 보냅니다"
-
-	if ! $WORKER --queue "$QUEUE" --consumer-id demo-worker-01 --idle-exit-ms 4000; then
-		log_fail "장면 4: 워커가 예상 외 결과로 종료했습니다"
+	if ! prepare_dlq || ! settle_dlq; then
+		log_fail "장면 4: 재시도 소진·DLQ 격리·정리가 실패했습니다"
 		return
 	fi
-
-	if ! $MONITOR wait --queue "$QUEUE" --state dlq --count 1 --timeout-ms 5000; then
-		log_fail "장면 4: DLQ 로 이동하지 않았습니다"
-		return
-	fi
-
-	$MONITOR dlq --queue "$QUEUE"
-
-	log_pass "장면 4: 재시도가 소진되어 DLQ 로 격리되었습니다"
+	log_pass "장면 4: 재시도 소진 후 DLQ로 이동하고 시험 메시지를 정리했습니다"
 }
 
 # ── 장면 5: DLQ 재처리 ───────────────────────────────────────────────────────
 act_5()
 {
-	if [[ "$ONLY_ACT" == "5" ]]; then
-		act_4
-		if [[ $FAIL_COUNT -gt 0 ]]; then
-			return
-		fi
-	fi
-
 	scene "장면 5 — 원인을 조치한 뒤 DLQ 메시지를 재투입한다"
-
-	if ! $MONITOR reprocess --queue "$QUEUE" --first; then
-		log_fail "장면 5: 재처리 요청이 실패했습니다"
+	if ! prepare_dlq || ! settle_dlq; then
+		log_fail "장면 5: DLQ 준비·재처리·정산이 실패했습니다"
 		return
 	fi
-
-	if ! $MONITOR wait --queue "$QUEUE" --state ready --count 1 --timeout-ms 5000; then
-		log_fail "장면 5: 재처리한 메시지가 ready 로 돌아오지 않았습니다"
-		return
-	fi
-
-	log_info "설비를 정비했다고 보고 --ignore-fault 로 다시 처리합니다"
-
-	if ! $WORKER --queue "$QUEUE" --consumer-id demo-worker-01 --ignore-fault \
-		--max-messages 1 --idle-exit-ms 5000; then
-		log_fail "장면 5: 재투입 처리에 실패했습니다"
-		return
-	fi
-
-	if ! $MONITOR wait --queue "$QUEUE" --state dlq --max 0 --timeout-ms 5000; then
-		log_fail "장면 5: DLQ 가 비워지지 않았습니다"
-		return
-	fi
-
-	log_pass "장면 5: reprocess 후 attempt 가 초기화되고 정상 처리되었습니다"
+	log_pass "장면 5: 독립적으로 준비한 DLQ 메시지를 재처리했습니다"
 }
-
-# ── 장면 6: 지정 배달 ────────────────────────────────────────────────────────
 act_6()
 {
 	scene "장면 6 — 지정한 워커만 받을 수 있다"
 
-	$SENSOR --queue "$QUEUE" --count 1 --target demo-worker-01 || { log_fail "장면 6: 발행 실패"; return; }
+	"$SENSOR" --queue "$QUEUE" --count 1 --target demo-worker-01 || { log_fail "장면 6: 발행 실패"; return; }
 
 	log_info "대상이 아닌 워커를 먼저 띄웁니다 — 이 워커는 끝까지 받지 못해야 합니다"
 
-	$WORKER --queue "$QUEUE" --consumer-id demo-worker-other --max-messages 1 --idle-exit-ms 3000
+	if ! "$WORKER" --queue "$QUEUE" --consumer-id demo-worker-other --max-messages 1 --expect-messages 0 --idle-exit-ms 3000; then
+		log_fail "장면 6: 비대상 워커가 수신했거나 통신에 실패했습니다"
+		return
+	fi
 
-	if ! $MONITOR wait --queue "$QUEUE" --state ready --count 1 --timeout-ms 3000; then
+	if ! "$MONITOR" wait --queue "$QUEUE" --state ready --count 1 --timeout-ms 3000; then
 		log_fail "장면 6: 대상이 아닌 워커가 메시지를 가져갔습니다"
 		return
 	fi
 
 	log_info "지정된 워커를 띄웁니다"
 
-	if ! $WORKER --queue "$QUEUE" --consumer-id demo-worker-01 --max-messages 1 --idle-exit-ms 5000; then
+	if ! "$WORKER" --queue "$QUEUE" --consumer-id demo-worker-01 --max-messages 1 --expect-messages 1 --idle-exit-ms 5000; then
 		log_fail "장면 6: 지정된 워커가 처리하지 못했습니다"
 		return
 	fi
 
-	if ! $MONITOR wait --queue "$QUEUE" --state ready --max 0 --timeout-ms 5000; then
+	if ! "$MONITOR" check-empty --queue "$QUEUE"; then
 		log_fail "장면 6: 메시지가 정산되지 않았습니다"
 		return
 	fi

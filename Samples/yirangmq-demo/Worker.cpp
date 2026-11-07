@@ -41,6 +41,7 @@ Options:
   --poll-ms <ms>         큐가 비었을 때 재시도 간격 (기본: 250)
   --idle-exit-ms <ms>    이 시간만큼 계속 비어 있으면 정상 종료 (기본: 0 = 무한 대기)
   --max-messages <n>     이만큼 정산하면 종료 (기본: 0 = 무제한)
+  --expect-messages <n>  종료 시 정산 시도 건수가 이 값과 같아야 성공 (기본: 미검증)
   --work-ms <ms>         메시지당 작업 시간 시뮬레이션. lease 가 모자라면 extend_lease 호출 (기본: 0)
   --stall-ms <ms>        lease 를 쥔 채 이만큼 멈춘 뒤 ack 을 시도한다. 가시성보다 크게 주면
                          lease 를 잃고 ack 이 거부되는 장면을 재현한다 (기본: 0)
@@ -75,6 +76,7 @@ auto main(int argc, char* argv[]) -> int
 	const auto poll_ms = args.to_int("--poll-ms").value_or(250);
 	const auto idle_exit_ms = args.to_long("--idle-exit-ms").value_or(0);
 	const auto max_messages = args.to_int("--max-messages").value_or(0);
+	const auto expected_messages = args.to_int("--expect-messages");
 	const auto work_ms = args.to_long("--work-ms").value_or(0);
 	const auto stall_ms = args.to_long("--stall-ms").value_or(0);
 	const auto ignore_fault = args.to_string("--ignore-fault").has_value();
@@ -113,9 +115,8 @@ auto main(int argc, char* argv[]) -> int
 		if (!leased.ok)
 		{
 			Demo::say(consumer_id, std::format("소비 요청 실패 — {}", leased.error.value_or("unknown")));
-			Demo::sleep_ms(poll_ms, running);
-
-			continue;
+			++unexpected;
+			break;
 		}
 
 		// 빈 큐는 오류가 아니다. ok 는 true 이고 data.message 가 null 로 온다.
@@ -179,7 +180,11 @@ auto main(int argc, char* argv[]) -> int
 			auto late = mq.call("ack", settle);
 			++settled;
 
-			if (!late.ok)
+			if (!late.ok && late.error_code == "ERR_INTERNAL_ERROR"
+				&& (late.error->find("ack rejected:") != std::string::npos
+					|| late.error->find("lease expired") != std::string::npos
+					|| late.error->find("lease_id mismatch") != std::string::npos
+					|| late.error->find("lease not found:") != std::string::npos))
 			{
 				++fenced;
 				Demo::say(consumer_id, std::format("늦은 ack 거부됨 (기대한 결과) — {}", late.error.value_or("unknown")));
@@ -188,7 +193,7 @@ auto main(int argc, char* argv[]) -> int
 			else
 			{
 				++unexpected;
-				Demo::say(consumer_id, "예상과 다릅니다: 만료된 lease 의 ack 이 승인되었습니다");
+				Demo::say(consumer_id, std::format("예상한 lease 거부 응답이 아닙니다: {}", late.error.value_or("ACK accepted")));
 			}
 
 			continue;
@@ -284,5 +289,14 @@ auto main(int argc, char* argv[]) -> int
 
 	Demo::say(consumer_id, std::format("요약 — ack {}건 / nack {}건 / 거부 확인 {}건 / 예상 외 {}건", acked, nacked, fenced, unexpected));
 
+	if (!running.load())
+	{
+		return 130;
+	}
+	if (expected_messages.has_value() && settled != expected_messages.value())
+	{
+		Demo::say(consumer_id, std::format("정산 건수 불일치: 기대 {}, 실제 {}", expected_messages.value(), settled));
+		return 1;
+	}
 	return unexpected > 0 ? 1 : 0;
 }

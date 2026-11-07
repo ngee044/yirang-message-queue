@@ -56,6 +56,7 @@ namespace Demo
 			}
 
 			result.error = std::format("{}: {}", code, message);
+			result.error_code = code;
 
 			return result;
 		}

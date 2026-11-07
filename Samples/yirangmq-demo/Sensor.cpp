@@ -135,7 +135,7 @@ auto main(int argc, char* argv[]) -> int
 		{
 			++rejected;
 
-			if (omit_device_id)
+			if (omit_device_id && result.error_code == "ERR_VALIDATION_FAILED")
 			{
 				Demo::say(client_id, std::format("거부 (의도된 실패) {}", result.error.value_or("unknown")));
 			}

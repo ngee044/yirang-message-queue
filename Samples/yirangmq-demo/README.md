@@ -64,9 +64,9 @@ t+   0.1s  demo-monitor         msg:telemetry:F515-...  attempt=5  4초 전  사
 그래서 이 예제는 **없는 것만 새로 만들고 되는 것은 재사용합니다.**
 
 - 새로 만든 것: 상주 워커(`yirangmq-demo-worker`), 발행 프로세스(`yirangmq-demo-sensor`), 관측 콘솔(`yirangmq-demo-monitor`)
-- 그대로 쓰는 것: 데몬(`MainMQ`), 설정(`main_mq_configuration.json`의 `telemetry` 큐), 그리고 손으로 확인할 때의 기존 CLI 두 개
+- 그대로 쓰는 것: 데몬(`MainMQ`), 공통 MailboxClient, 그리고 손으로 확인할 때의 기존 CLI 두 개
 
-설정 파일은 한 줄도 고치지 않습니다. 기본 큐 `telemetry`에 이미 스키마(`deviceId` 필수, `timestamp` 숫자)와 정책(`retry.limit` 5, `dlq.enabled`)이 등록되어 있어, 검증·재시도·DLQ가 전부 살아 있는 상태로 재현됩니다.
+기본 실행은 임시 디렉터리에 시연 전용 설정을 만듭니다. 선택한 큐에 `deviceId` 필수 스키마와 재시도 한도 5회, 고정 백오프 1초 정책을 등록합니다. 기존 실행 위치의 설정·IPC·데이터와 분리됩니다.
 
 ---
 
@@ -117,18 +117,20 @@ cd build/out && ./run-demo.sh
 
 러너가 하는 일:
 
-1. **`build/out`으로 이동한다.** IPC 루트(`./ipc`)가 작업 디렉터리 기준 상대 경로이므로, 이 이동이 없으면 데몬과 다른 디렉터리를 보게 되어 오류 없이 타임아웃만 발생합니다.
-2. **데몬이 응답하는지 먼저 확인한다.** 있으면 그대로 쓰고, 없으면 `--db-path ./data/demo.db`로 띄웁니다. 같은 IPC 루트에 데몬이 둘이면 서로 요청을 가져가므로, 새로 띄우기 전에 반드시 확인합니다.
-3. **6개 장면을 순서대로 재현하고 통과/실패를 집계한다.** 하나라도 실패하면 0이 아닌 코드로 종료합니다.
+1. **실행 파일을 확인하고 임시 실행 위치를 만든다.** 자체 SQLite 데몬과 시연 프로세스가 같은 임시 IPC 루트를 사용합니다. 기존 데몬에 자동으로 연결하지 않습니다.
+2. **헬스 응답과 등록된 빈 큐를 확인한다.** `--attach`를 명시한 경우에만 실행 파일 디렉터리의 기존 IPC에 연결합니다. ready/inflight/delayed/DLQ 중 하나라도 남아 있으면 발행 전에 실패합니다.
+3. **6개 장면을 재현하고 모든 상태가 비워졌는지 확인한다.** 장면 4·5는 각각 DLQ 메시지를 준비·정리합니다. 처리 횟수·대기 시간을 제한하며, 자신의 데몬 정상 종료까지 확인합니다. 실패하면 0이 아닌 코드로 종료하고 자신이 만든 임시 자원만 정리합니다.
 
 옵션:
 
 ```bash
 ./run-demo.sh --act 3      # 특정 장면만
 ./run-demo.sh --attach     # 이미 떠 있는 데몬에 붙는다 (새로 띄우지 않음)
-./run-demo.sh --reset      # 데모 전용 데이터를 지우고 시작
+./run-demo.sh --reset      # 호환 옵션: 기본 실행도 매번 새 임시 데이터를 사용
 ./run-demo.sh --bin-dir /app   # Docker 안에서
 ```
+
+`--attach`와 `--reset`은 함께 사용할 수 없습니다. 연결할 큐에는 `deviceId` 필수 검증, DLQ 활성화, 최대 5회의 재시도 한도가 필요합니다. 장면 3의 재배달은 15초 안에 이루어져야 합니다. 다른 소비자가 같은 큐를 처리 중이라면 자체 데몬을 사용하는 기본 실행으로 검증하십시오.
 
 ### 손으로 따라가기
 
@@ -150,7 +152,7 @@ cd build/out && ./yirangmq-demo-worker --consumer-id demo-worker-02 --visibility
 
 # 파일이 통신 채널이라는 증거
 ls -R build/out/ipc
-sqlite3 build/out/data/demo.db \
+sqlite3 build/out/data/yirangmq.db \
   "select message_key, state, attempt, lease_consumer_id, target_consumer_id from msg_index;"
 ```
 
@@ -207,7 +209,7 @@ sequenceDiagram
 
 대기 워커를 나중에 띄우는 것이 핵심입니다. 둘을 동시에 띄우면 어느 쪽이 먼저 `consume_next`를 보낼지 알 수 없어 장면이 흔들립니다.
 
-재배달까지 걸리는 시간은 `가시성 2초 + lease 스윕 ≤1초 + 백오프 1초 + retry 스윕 ≤1초`로 통상 3~5초이고, 멈춘 워커의 ack은 6초 뒤이므로 항상 그 뒤에 옵니다.
+기본 설정의 재배달은 `가시성 2초 + lease 스윕 + 백오프 1초 + retry 스윕`을 거칩니다. 멈춘 워커의 ACK는 6초 뒤에 시도하며, 실제 재배달과 정산 여부는 두 워커의 처리 건수·종료 코드와 최종 큐 상태로 확인합니다.
 
 ---
 
@@ -236,6 +238,7 @@ sequenceDiagram
 | `--poll-ms <ms>` | 큐가 비었을 때 재시도 간격 | 250 |
 | `--idle-exit-ms <ms>` | 이 시간만큼 비어 있으면 정상 종료 | 0 = 무한 |
 | `--max-messages <n>` | 이만큼 정산하면 종료 | 0 = 무제한 |
+| `--expect-messages <n>` | 종료 시 정산 시도 건수가 정확히 이 값이어야 성공 | 미검증 |
 | `--work-ms <ms>` | 작업 시간 시뮬레이션. lease가 모자라면 `extend_lease` 호출 | 0 |
 | `--stall-ms <ms>` | lease를 쥔 채 멈춘 뒤 ack을 시도한다 | 0 |
 | `--ignore-fault` | `fault` 필드가 있어도 정상 처리한다 (정비 후 재투입) | 꺼짐 |
@@ -246,10 +249,13 @@ sequenceDiagram
 |------|------|
 | `watch` | 상태가 바뀔 때만 한 줄씩 출력 (기본) |
 | `once` | 현재 상태 + 정책 등록 여부 |
+| `check-empty` | 등록된 큐이고 ready/inflight/delayed/DLQ가 모두 0일 때만 성공 |
 | `dlq` | DLQ 목록 표 |
 | `reprocess --message-key <key>` / `--first` | DLQ 메시지를 `ready`로 되돌린다 |
 | `wait --state <s> --count <n>` | 해당 상태가 `n` 이상이 될 때까지 대기 (러너 게이트) |
 | `wait --state <s> --max <n>` | 해당 상태가 `n` 이하가 될 때까지 대기 |
+
+`wait`에 `--count`와 `--max`를 함께 주면 두 조건을 모두 만족해야 합니다. 상태 카운터가 빠진 응답은 실패입니다. 잘못된 프레임은 `ERR_VALIDATION_FAILED`일 때만 기대한 거부로 판정하고, 늦은 ACK는 lease 거부 응답일 때만 성공으로 판정합니다. 통신 타임아웃과 일반 백엔드 오류는 실패로 처리합니다.
 
 ---
 

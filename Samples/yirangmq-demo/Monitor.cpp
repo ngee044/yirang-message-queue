@@ -80,7 +80,22 @@ namespace
 
 		// 미등록 큐도 ERR_QUEUE_NOT_FOUND 가 아니라 ok=true 로 오고, metrics 는 전부 0 이며
 		// policy 키가 없다. 그래서 policy 유무가 "큐가 등록되었는지"의 진단이 된다.
-		const auto metrics = result.data.contains("metrics") ? result.data["metrics"] : json::object();
+		if (!result.data.contains("metrics") || !result.data["metrics"].is_object())
+		{
+			error = "status response has no metrics object";
+
+			return false;
+		}
+		const auto& metrics = result.data["metrics"];
+		for (const auto& state : state_names)
+		{
+			if (!metrics.contains(state) || !metrics[state].is_number_integer() || metrics[state].get<int64_t>() < 0)
+			{
+				error = std::format("status response has invalid {} count", state);
+
+				return false;
+			}
+		}
 
 		out.ready = metrics.value("ready", static_cast<int64_t>(0));
 		out.inflight = metrics.value("inflight", static_cast<int64_t>(0));
@@ -100,6 +115,7 @@ Usage: yirangmq-demo-monitor <command> [options]
 Commands:
   watch      상태가 바뀔 때만 한 줄씩 출력한다 (기본)
   once       현재 상태와 등록된 정책 유무를 한 번 출력한다
+  check-empty 정책이 등록되고 모든 상태의 메시지가 0개인지 확인한다
   dlq        DLQ 목록을 표로 출력한다
   reprocess  DLQ 메시지를 ready 로 되돌린다
   wait       상태 조건이 충족될 때까지 기다린다 (러너 스크립트용 게이트)
@@ -155,7 +171,7 @@ auto main(int argc, char* argv[]) -> int
 
 	const Demo::MqCall mq(ipc_root, client_id, timeout_ms);
 
-	if (command == "once")
+	if (command == "once" || command == "check-empty")
 	{
 		Snapshot snapshot;
 		std::string error;
@@ -169,6 +185,11 @@ auto main(int argc, char* argv[]) -> int
 		Demo::say(client_id, std::format("{}  {}", queue, snapshot.text()));
 		Demo::say(client_id, snapshot.has_policy ? "정책 등록됨 (queues[] 에 선언된 큐)" : "정책 없음 — 미등록 큐입니다. 스키마 검증과 TTL 이 적용되지 않습니다");
 
+		if (command == "check-empty")
+		{
+			return snapshot.has_policy && snapshot.ready == 0 && snapshot.inflight == 0
+				&& snapshot.delayed == 0 && snapshot.dlq == 0 ? 0 : 1;
+		}
 		return 0;
 	}
 
@@ -227,11 +248,8 @@ auto main(int argc, char* argv[]) -> int
 			{
 				const auto value = snapshot.of(state);
 
-				if (at_least.has_value() && value >= at_least.value())
-				{
-					return 0;
-				}
-				if (at_most.has_value() && value <= at_most.value())
+				if (value >= 0 && (!at_least.has_value() || value >= at_least.value())
+					&& (!at_most.has_value() || value <= at_most.value()))
 				{
 					return 0;
 				}

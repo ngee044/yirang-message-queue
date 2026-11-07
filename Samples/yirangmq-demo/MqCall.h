@@ -19,6 +19,7 @@ namespace Demo
 		bool ok = false;
 		nlohmann::json data = nlohmann::json::object();
 		std::optional<std::string> error;
+		std::string error_code;
 	};
 
 	class MqCall

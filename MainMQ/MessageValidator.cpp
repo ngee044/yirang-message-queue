@@ -238,13 +238,15 @@ auto MessageValidator::validate_rule(const void* json_obj, const ValidationRule&
 			break;
 		}
 
-		if (rule.custom_validator)
+		if (!rule.custom_validator)
 		{
-			std::string value_str = payload[rule.field].dump();
-			if (!rule.custom_validator(value_str))
-			{
-				return make_error(std::format("field '{}' failed custom validation", rule.field));
-			}
+			return make_error(std::format("field '{}' has unresolved custom validator '{}'", rule.field, rule.custom_validator_name));
+		}
+
+		std::string value_str = payload[rule.field].dump();
+		if (!rule.custom_validator(value_str))
+		{
+			return make_error(std::format("field '{}' failed custom validation", rule.field));
 		}
 		break;
 	}

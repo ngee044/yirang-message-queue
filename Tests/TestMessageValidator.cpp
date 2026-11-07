@@ -899,6 +899,70 @@ TEST_F(MessageValidatorTest, CombinedStringLengthRules)
 }
 
 // =============================================================================
+// Custom rules
+// =============================================================================
+
+TEST_F(MessageValidatorTest, UnresolvedCustomValidatorRejectsPresentField)
+{
+	ValidationRule rule;
+	rule.field = "deviceId";
+	rule.type = ValidationRuleType::Custom;
+	rule.custom_validator_name = "known_device";
+
+	MessageSchema schema;
+	schema.rules = { rule };
+	validator_.resolve_custom_validators(schema);
+	validator_.register_schema("test_queue", schema);
+
+	auto result = validator_.validate_json(R"({"deviceId":"unknown"})", "test_queue");
+	EXPECT_FALSE(result.valid);
+	ASSERT_EQ(result.errors.size(), 1u);
+	EXPECT_NE(result.errors.front().find("known_device"), std::string::npos);
+}
+
+TEST_F(MessageValidatorTest, UnresolvedCustomValidatorAllowsAbsentOptionalField)
+{
+	ValidationRule rule;
+	rule.field = "deviceId";
+	rule.type = ValidationRuleType::Custom;
+	rule.custom_validator_name = "known_device";
+
+	MessageSchema schema;
+	schema.rules = { rule };
+	validator_.register_schema("test_queue", schema);
+
+	auto result = validator_.validate_json("{}", "test_queue");
+	EXPECT_TRUE(result.valid);
+	EXPECT_TRUE(result.errors.empty());
+}
+
+TEST_F(MessageValidatorTest, ResolvedCustomValidatorAcceptsAndRejectsValues)
+{
+	validator_.register_custom_validator("known_device", [](const std::string& value) -> bool
+	{
+		return value == R"("sensor-01")";
+	});
+
+	ValidationRule rule;
+	rule.field = "deviceId";
+	rule.type = ValidationRuleType::Custom;
+	rule.custom_validator_name = "known_device";
+
+	MessageSchema schema;
+	schema.rules = { rule };
+	validator_.resolve_custom_validators(schema);
+	validator_.register_schema("test_queue", schema);
+
+	auto accepted = validator_.validate_json(R"({"deviceId":"sensor-01"})", "test_queue");
+	EXPECT_TRUE(accepted.valid);
+	EXPECT_TRUE(accepted.errors.empty());
+
+	auto rejected = validator_.validate_json(R"({"deviceId":"unknown"})", "test_queue");
+	EXPECT_FALSE(rejected.valid);
+	EXPECT_EQ(rejected.errors.size(), 1u);
+}
+
+// =============================================================================
 // Schema replacement
 // =============================================================================
 

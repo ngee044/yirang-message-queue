@@ -62,6 +62,7 @@ RUN apt-get update && apt-get install -y \
     libsqlite3-0 \
     liblz4-1 \
     jq \
+    python3 \
     && rm -rf /var/lib/apt/lists/*
 
 RUN useradd -m -s /bin/bash yirangmq
@@ -80,6 +81,7 @@ RUN sed -i 's/"useFolderWatcher": true/"useFolderWatcher": false/' /app/main_mq_
 
 # Copy integration test script
 COPY docker/integration-test.sh /app/integration-test.sh
+COPY Tests/integration_scenarios.py /app/integration_scenarios.py
 RUN chmod +x /app/integration-test.sh
 
 RUN chown -R yirangmq:yirangmq /app

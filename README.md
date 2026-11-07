@@ -817,7 +817,7 @@ while (running)
 ./test.sh --no-build          # 이미지 재빌드 없이 반복 실행
 ```
 
-기본 엔진은 Docker이며 Linux/GCC 검증에 사용합니다. macOS에서도 `./build.sh --test`로 빌드·단위 테스트를 실행하거나 `./test.sh --local`로 단위 테스트와 시연을 실행할 수 있습니다. 통합 시나리오는 Docker에서 실행합니다.
+기본 엔진은 Docker이며 Linux/GCC 검증에 사용합니다. macOS에서도 `./build.sh --test`로 빌드·단위 테스트를 실행하거나 `./test.sh --local`로 세 단계를 모두 실행할 수 있습니다. 통합 시나리오는 Python 3 표준 라이브러리를 사용합니다.
 
 직접 호출하려면:
 
@@ -830,7 +830,7 @@ cd docker && ./docker-compose.sh demo          # 시연 (실행 중인 서비스
 | 스위트 | 대상 |
 |--------|------|
 | `TestSQLiteAdapter` / `TestFileSystemAdapter` / `TestHybridAdapter` | 백엔드별 저장·lease·재시도·DLQ 동작 |
-| `TestBackendContract` | 3개 백엔드에 동일 계약을 적용하는 파라미터화 스위트 |
+| `TestBackendContract` | 17개 계약을 SQLite/FileSystem/Hybrid에 동일하게 적용하는 파라미터화 스위트 |
 | `TestQueueManager` | lease 회수, 백오프 계산, TTL purge |
 | `TestMailboxHandler` | 요청 파싱, 명령 디스패치, 응답 생성, 격리 처리 |
 | `TestMessageValidator` | 스키마 규칙 |
@@ -838,9 +838,11 @@ cd docker && ./docker-compose.sh demo          # 시연 (실행 중인 서비스
 | `TestFile` / `TestLogger` / `TestConverter` | 공용 유틸리티 |
 | `TestThreadPool` | 워커 실행·종료와 잡 재등록 |
 
-통합 테스트는 컨테이너 안에서 데몬을 띄우고 헬스 체크, 발행, 큐 상태, 소비, ACK, NACK, 메트릭, 지정 배달, DLQ 조회, 정상 종료까지 실제 프로세스 경계를 지나며 확인합니다.
+단위·계약 테스트는 318개입니다. 통합 드라이버 `Tests/integration_scenarios.py`는 실제 데몬·CLI와 파일 IPC를 사용하여 13개 시나리오를 백엔드 3종 × 폴링/이벤트 모드 × 정순/역순 2회로 실행합니다(156건). 매번 다른 큐에 ready/inflight/delayed/DLQ 메시지를 유지하고 각 시나리오 후 보존 여부를 검사합니다. 잘못된 요청·소유자·lease, 중복 ACK, 재시도 소진과 재처리, 지연·TTL, 동시 소비, 정상 재시작, 데몬 부재 시 타임아웃을 검증합니다.
 
-`--act`는 1~6만 허용하며, 장면 5를 단독 실행하면 필요한 DLQ 메시지를 장면 4로 먼저 준비합니다.
+정상 종료 6건과 테스트 도구가 실패를 성공으로 오판하지 않는지 확인하는 프로토콜 대역 검사 7건을 별도로 실행합니다. 실제 정전과 장시간 부하 시험은 이 실행 범위에 포함하지 않습니다.
+
+시연은 기본적으로 임시 디렉터리의 자체 SQLite 데몬을 사용합니다. `--attach`는 등록된 빈 큐에서만 시작하며 기존 데몬을 종료하거나 데이터를 초기화하지 않습니다. `--act`는 1~6만 허용하고, 장면 4·5는 각각 필요한 DLQ 메시지를 준비하고 정리하므로 단독 실행이 가능합니다. 자세한 조건은 [시연 README](Samples/yirangmq-demo/README.md)를 참조하십시오.
 
 ### 도입 전 알아야 할 한계
 

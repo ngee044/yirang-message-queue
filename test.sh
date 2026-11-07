@@ -8,7 +8,7 @@
 #
 # 세 단계를 실행한다.
 #   unit         gtest 단위 스위트 (ctest)
-#   integration  데몬 + CLI 종단 시나리오 (IT-01~09 + graceful shutdown)
+#   integration  데몬 + CLI 종단 시나리오 (3 backend × 2 mode × 2 rounds)
 #   demo         애플리케이션 계층 프로세스 시연 장면 (DS-01~06)
 #
 # 기본 엔진은 Docker다. macOS 로컬 빌드도 지원하며 --local 로 반복 검증한다.
@@ -51,7 +51,7 @@ print_usage() {
     echo ""
     echo "PHASES:"
     echo "  -u, --unit          단위 테스트만 (ctest, 12개 스위트)"
-    echo "  -i, --integration   통합 시나리오만 (IT-01~09 + graceful shutdown)"
+    echo "  -i, --integration   통합 시나리오만 (IT-01~13 + graceful shutdown)"
     echo "  -m, --demo          시연 장면만 (DS-01~06)"
     echo ""
     echo "OPTIONS:"
@@ -78,8 +78,7 @@ print_usage() {
     echo "    매칭되지 않으며, 그 경우 --no-tests=error 에 의해 통과가 아니라 실패로 잡힌다."
     echo "    이름 목록은 --list 로 확인한다."
     echo "  * --local 은 Linux/macOS의 기존 build/ 산출물을 사용한다."
-    echo "  * --local 에서는 통합 시나리오를 건너뛴다. integration-test.sh 가 컨테이너의"
-    echo "    /app 경로를 전제하기 때문이다."
+    echo "  * 통합 시나리오는 Python 3 표준 라이브러리를 사용하며 임시 디렉터리에 격리한다."
     echo ""
 }
 
@@ -136,7 +135,6 @@ fi
 
 PASS_COUNT=0
 FAIL_COUNT=0
-SKIP_COUNT=0
 RESULTS=""
 
 log_info() { echo -e "${CYAN}[INFO]${NC} $1"; }
@@ -145,7 +143,6 @@ log_error() { echo -e "${RED}[FAIL]${NC} $1"; }
 
 record_pass() { PASS_COUNT=$((PASS_COUNT + 1)); RESULTS="${RESULTS}\n  ${GREEN}PASS${NC}  $1"; echo -e "${GREEN}[PASS]${NC} $1"; }
 record_fail() { FAIL_COUNT=$((FAIL_COUNT + 1)); RESULTS="${RESULTS}\n  ${RED}FAIL${NC}  $1"; echo -e "${RED}[FAIL]${NC} $1"; }
-record_skip() { SKIP_COUNT=$((SKIP_COUNT + 1)); RESULTS="${RESULTS}\n  ${YELLOW}SKIP${NC}  $1 — $2"; echo -e "${YELLOW}[SKIP]${NC} $1 — $2"; }
 
 phase() {
     echo ""
@@ -216,7 +213,7 @@ run_docker_engine() {
     fi
 
     if [[ "$RUN_INTEGRATION" == true ]]; then
-        phase "단계 2/3 — 통합 시나리오 (IT-01~09)"
+        phase "단계 2/3 — 통합 시나리오 (IT-01~13)"
 
         if docker run --rm "$INTEGRATION_IMAGE" --integration-only; then
             record_pass "통합 시나리오"
@@ -266,7 +263,11 @@ run_local_engine() {
 
     if [[ "$RUN_INTEGRATION" == true ]]; then
         phase "단계 2/3 — 통합 시나리오"
-        record_skip "통합 시나리오" "docker/integration-test.sh 가 컨테이너의 /app 경로를 전제한다. --docker 로 실행하십시오"
+        if "$SCRIPT_DIR/docker/integration-test.sh" --integration-only --bin-dir "$BUILD_DIR/out"; then
+            record_pass "통합 시나리오"
+        else
+            record_fail "통합 시나리오"
+        fi
     fi
 
     if [[ "$RUN_DEMO" == true ]]; then
@@ -274,7 +275,8 @@ run_local_engine() {
 
         local runner="$BUILD_DIR/out/run-demo.sh"
         if [[ ! -x "$runner" ]]; then
-            record_skip "시연 장면" "$runner 가 없습니다. ./build.sh 로 빌드하십시오"
+            log_error "$runner 가 없습니다. ./build.sh 로 빌드하십시오"
+            record_fail "시연 장면"
         else
             local demo_args=(--reset)
             [[ -n "$DEMO_ACT" ]] && demo_args+=(--act "$DEMO_ACT")
@@ -301,7 +303,7 @@ phase "결과 요약"
 
 printf '%b\n' "$RESULTS"
 echo ""
-echo -e "  통과: ${GREEN}${PASS_COUNT}${NC}   실패: ${RED}${FAIL_COUNT}${NC}   건너뜀: ${YELLOW}${SKIP_COUNT}${NC}"
+echo -e "  통과: ${GREEN}${PASS_COUNT}${NC}   실패: ${RED}${FAIL_COUNT}${NC}"
 echo ""
 
 if [[ $FAIL_COUNT -gt 0 ]]; then

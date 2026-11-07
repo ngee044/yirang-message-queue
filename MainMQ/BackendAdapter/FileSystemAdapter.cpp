@@ -1000,7 +1000,8 @@ auto FileSystemAdapter::atomic_write(const std::string& target_path, const std::
 	std::filesystem::rename(temp_path, target_path, ec);
 	if (ec)
 	{
-		std::filesystem::remove(temp_path, ec);
+		std::error_code cleanup_error;
+		std::filesystem::remove(temp_path, cleanup_error);
 		return { false, std::format("rename failed: {}", ec.message()) };
 	}
 

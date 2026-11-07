@@ -48,7 +48,8 @@ auto atomic_write(const std::string& target_path, const std::string& content) ->
 	std::filesystem::rename(temp_path, target_path, ec);
 	if (ec)
 	{
-		std::filesystem::remove(temp_path, ec);
+		std::error_code cleanup_error;
+		std::filesystem::remove(temp_path, cleanup_error);
 		Logger::handle().write(
 			LogTypes::Error,
 			std::format("Rename failed: {}", ec.message())

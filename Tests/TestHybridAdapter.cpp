@@ -202,6 +202,55 @@ TEST_F(HybridAdapterTest, EnqueueAndLease)
 // ---------------------------------------------------------------------------
 // AckDeletesPayload: ack removes payload from active, moves to archive
 // ---------------------------------------------------------------------------
+TEST_F(HybridAdapterTest, LeaseMissingPayloadRollsBack)
+{
+	auto envelope = make_envelope("telemetry", R"({"temp":36.5})");
+	auto [enqueued, enqueue_error] = adapter_->enqueue(envelope);
+	ASSERT_TRUE(enqueued) << enqueue_error.value_or("unknown");
+	auto path = fs::path(active_dir("telemetry")) / std::format("{}.json", envelope.message_id);
+	auto backup = std::format("{}.backup", path.string());
+	fs::rename(path, backup);
+
+	auto result = adapter_->lease_next("telemetry", "worker-01", 30);
+	EXPECT_FALSE(result.leased);
+	EXPECT_TRUE(result.error.has_value());
+	EXPECT_FALSE(result.message.has_value());
+	EXPECT_FALSE(result.lease.has_value());
+
+	fs::rename(backup, path);
+	auto recovered = adapter_->lease_next("telemetry", "worker-01", 30);
+	ASSERT_TRUE(recovered.leased) << recovered.error.value_or("unknown");
+	ASSERT_TRUE(recovered.message.has_value());
+	EXPECT_EQ(recovered.message->attempt, 1);
+	EXPECT_EQ(recovered.message->payload_json, envelope.payload_json);
+}
+
+TEST_F(HybridAdapterTest, LeaseMalformedPayloadRollsBack)
+{
+	auto envelope = make_envelope("telemetry", R"({"temp":36.5})");
+	auto [enqueued, enqueue_error] = adapter_->enqueue(envelope);
+	ASSERT_TRUE(enqueued) << enqueue_error.value_or("unknown");
+	auto path = fs::path(active_dir("telemetry")) / std::format("{}.json", envelope.message_id);
+	auto backup = std::format("{}.backup", path.string());
+	fs::rename(path, backup);
+	{
+		std::ofstream malformed(path);
+		malformed << "{";
+	}
+
+	auto result = adapter_->lease_next("telemetry", "worker-01", 30);
+	EXPECT_FALSE(result.leased);
+	EXPECT_TRUE(result.error.has_value());
+	EXPECT_FALSE(result.lease.has_value());
+
+	fs::remove(path);
+	fs::rename(backup, path);
+	auto recovered = adapter_->lease_next("telemetry", "worker-01", 30);
+	ASSERT_TRUE(recovered.leased) << recovered.error.value_or("unknown");
+	ASSERT_TRUE(recovered.message.has_value());
+	EXPECT_EQ(recovered.message->attempt, 1);
+}
+
 TEST_F(HybridAdapterTest, AckDeletesPayload)
 {
 	auto env = make_envelope("jobs", R"({"action":"build"})");

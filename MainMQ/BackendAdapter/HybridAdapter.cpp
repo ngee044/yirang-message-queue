@@ -445,14 +445,6 @@ auto HybridAdapter::lease_next(const std::string& queue, const std::string& cons
 
 	std::string envelope_json = kv_stmt->column_text(0);
 
-	auto commit_result = db_.commit();
-	if (!commit_result)
-	{
-		db_.rollback();
-		result.error = commit_result.error();
-		return result;
-	}
-
 	try
 	{
 		json envelope = json::parse(envelope_json);
@@ -466,11 +458,22 @@ auto HybridAdapter::lease_next(const std::string& queue, const std::string& cons
 		msg.created_at_ms = envelope.value("createdAt", static_cast<int64_t>(0));
 
 		auto [payload_content, payload_error] = read_payload(msg.queue, msg.message_id);
-		if (payload_content.has_value())
+		if (!payload_content.has_value())
 		{
-			json payload_json = json::parse(payload_content.value());
-			msg.payload_json = payload_json.value("payload", "{}");
-			msg.attributes_json = payload_json.value("attributes", "{}");
+			db_.rollback();
+			result.error = payload_error.value_or("payload not found");
+			return result;
+		}
+		json payload_json = json::parse(payload_content.value());
+		msg.payload_json = payload_json.value("payload", "{}");
+		msg.attributes_json = payload_json.value("attributes", "{}");
+
+		auto commit_result = db_.commit();
+		if (!commit_result)
+		{
+			db_.rollback();
+			result.error = commit_result.error();
+			return result;
 		}
 
 		LeaseToken lease;
@@ -485,6 +488,7 @@ auto HybridAdapter::lease_next(const std::string& queue, const std::string& cons
 	}
 	catch (const json::exception& e)
 	{
+		db_.rollback();
 		result.error = std::format("envelope parse error: {}", e.what());
 	}
 
@@ -1309,7 +1313,8 @@ auto HybridAdapter::atomic_write(const std::string& target_path, const std::stri
 	std::filesystem::rename(temp_path, target_path, ec);
 	if (ec)
 	{
-		std::filesystem::remove(temp_path, ec);
+		std::error_code cleanup_error;
+		std::filesystem::remove(temp_path, cleanup_error);
 		return { false, std::format("rename failed: {}", ec.message()) };
 	}
 

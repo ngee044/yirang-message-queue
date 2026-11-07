@@ -461,6 +461,29 @@ TEST_P(BackendContractTest, SettleRejectsForeignConsumer)
 }
 
 // ============================================================
+// TC-CONTRACT-17: Redrive must not report success for non-DLQ messages.
+// ============================================================
+TEST_P(BackendContractTest, RejectReprocessOutsideDlq)
+{
+	auto envelope = make_envelope("contract-q", R"({"test":"redrive-state"})");
+	auto [missing_ok, missing_error] = backend_->reprocess_dlq_message(envelope.key);
+	EXPECT_FALSE(missing_ok);
+	EXPECT_TRUE(missing_error.has_value());
+	auto [enqueued, enqueue_error] = backend_->enqueue(envelope);
+	ASSERT_TRUE(enqueued) << enqueue_error.value_or("");
+	auto [ready_ok, ready_error] = backend_->reprocess_dlq_message(envelope.key);
+	EXPECT_FALSE(ready_ok);
+	EXPECT_TRUE(ready_error.has_value());
+	auto leased = backend_->lease_next("contract-q", "worker", 30);
+	ASSERT_TRUE(leased.leased);
+	auto [inflight_ok, inflight_error] = backend_->reprocess_dlq_message(envelope.key);
+	EXPECT_FALSE(inflight_ok);
+	EXPECT_TRUE(inflight_error.has_value());
+	auto [acked, ack_error] = backend_->ack(leased.lease.value());
+	EXPECT_TRUE(acked) << ack_error.value_or("");
+}
+
+// ============================================================
 // Instantiate tests for all 3 backends
 // ============================================================
 INSTANTIATE_TEST_SUITE_P(

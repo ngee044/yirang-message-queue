@@ -1396,6 +1396,12 @@ auto SQLiteAdapter::reprocess_dlq_message(const std::string& message_key)
 		return { false, "failed to reprocess DLQ message" };
 	}
 
+	if (affected_rows(db_) <= 0)
+	{
+		db_.rollback();
+		return { false, "DLQ message not found" };
+	}
+
 	// Also update kv to remove dlq fields
 	std::string kv_select_sql = std::format(
 		"SELECT value FROM {} WHERE key = ?;",

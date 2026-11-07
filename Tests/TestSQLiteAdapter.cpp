@@ -620,12 +620,12 @@ TEST_F(SQLiteAdapterTest, ReprocessDlqMessageMovesBackToReady)
 	EXPECT_TRUE(result.leased) << "Reprocessed message should be leasable";
 }
 
-TEST_F(SQLiteAdapterTest, ReprocessDlqNonexistentKeyNoOp)
+TEST_F(SQLiteAdapterTest, ReprocessDlqNonexistentKeyFails)
 {
-	// SQLiteAdapter's reprocess returns true even for nonexistent keys (SQL UPDATE matches 0 rows)
 	auto [ok, err] = adapter_->reprocess_dlq_message("nonexistent-key-12345");
-	// Just verify it doesn't crash — behavior may vary by implementation
-	EXPECT_FALSE(err.has_value()) << "Should not return error: " << err.value_or("");
+	EXPECT_FALSE(ok);
+	ASSERT_TRUE(err.has_value());
+	EXPECT_EQ(err.value(), "DLQ message not found");
 }
 
 // ---------------------------------------------------------------------------

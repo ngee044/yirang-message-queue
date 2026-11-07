@@ -10,6 +10,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <format>
@@ -207,6 +208,13 @@ auto main(int argc, char* argv[]) -> int
 		if (state.empty() || (!at_least.has_value() && !at_most.has_value()))
 		{
 			Demo::say(client_id, "--state 와 --count 또는 --max 가 필요합니다");
+
+			return 2;
+		}
+
+		if (std::find(state_names.begin(), state_names.end(), state) == state_names.end())
+		{
+			Demo::say(client_id, std::format("알 수 없는 상태: {}", state));
 
 			return 2;
 		}

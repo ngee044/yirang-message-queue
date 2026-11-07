@@ -208,6 +208,8 @@ CMAKE_ARGS=(
 
 if [[ "$BUILD_TESTS" == false ]]; then
     CMAKE_ARGS+=(-DBUILD_TESTS=OFF)
+else
+    CMAKE_ARGS+=(-DBUILD_TESTS=ON)
 fi
 
 # Cross-compilation for embedded targets (F-14). The vcpkg toolchain stays primary and
@@ -245,7 +247,7 @@ log_info "Output directory: $BUILD_DIR/out"
 if [[ "$RUN_TESTS" == true && "$BUILD_TESTS" == true ]]; then
     echo ""
     log_info "Running tests..."
-    ctest --test-dir "$BUILD_DIR" --output-on-failure
+    ctest --test-dir "$BUILD_DIR" --output-on-failure --no-tests=error
 fi
 
 # List built executables

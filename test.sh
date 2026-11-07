@@ -11,8 +11,7 @@
 #   integration  데몬 + CLI 종단 시나리오 (IT-01~09 + graceful shutdown)
 #   demo         애플리케이션 계층 프로세스 시연 장면 (DS-01~06)
 #
-# 기본 엔진은 Docker다. macOS에서는 efsw의 vcpkg 빌드가 arm64-osx에서 실패해 로컬
-# 빌드가 불가하므로, Docker 없이는 검증할 수 없다.
+# 기본 엔진은 Docker다. macOS 로컬 빌드도 지원하며 --local 로 반복 검증한다.
 
 set -uo pipefail
 
@@ -56,7 +55,7 @@ print_usage() {
     echo "  -m, --demo          시연 장면만 (DS-01~06)"
     echo ""
     echo "OPTIONS:"
-    echo "      --local         Docker 대신 기존 $BUILD_DIR 트리를 사용한다 (Linux 전용)"
+    echo "      --local         Docker 대신 기존 $BUILD_DIR 트리를 사용한다 (Linux/macOS)"
     echo "      --docker        Docker 엔진을 사용한다 (기본값)"
     echo "  -n, --no-build      Docker 이미지를 다시 빌드하지 않고 기존 이미지를 쓴다"
     echo "  -f, --filter PAT    단위 테스트 필터 (ctest -R 정규식)"
@@ -70,7 +69,7 @@ print_usage() {
     echo "  $0 --unit --filter 'SQLiteAdapterTest\\.Lease'"
     echo "  $0 --demo --act 3                   # lease 만료 + fencing 장면만"
     echo "  $0 --no-build                       # 이미지 재빌드 없이 전체 재실행"
-    echo "  $0 --local --unit                   # Linux에서 기존 build/ 트리로 ctest"
+    echo "  $0 --local --unit                   # Linux/macOS에서 기존 build/ 트리로 ctest"
     echo ""
     echo "NOTES:"
     echo "  * 필터는 ctest 테스트 이름과 매칭한다. 이 이름은 소스 파일명이 아니라 gtest"
@@ -78,13 +77,21 @@ print_usage() {
     echo "    'QueueManagerTest.<케이스>' 로 등록된다. 'TestQueueManager' 로는 하나도"
     echo "    매칭되지 않으며, 그 경우 --no-tests=error 에 의해 통과가 아니라 실패로 잡힌다."
     echo "    이름 목록은 --list 로 확인한다."
-    echo "  * macOS 로컬 빌드는 efsw(arm64-osx) 실패로 불가하다. --local 은 Linux 전용이다."
+    echo "  * --local 은 Linux/macOS의 기존 build/ 산출물을 사용한다."
     echo "  * --local 에서는 통합 시나리오를 건너뛴다. integration-test.sh 가 컨테이너의"
     echo "    /app 경로를 전제하기 때문이다."
     echo ""
 }
 
 while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -f|--filter|--act)
+            if [[ $# -lt 2 || -z "$2" || "$2" == -* ]]; then
+                echo "Option $1 requires a value." >&2
+                exit 2
+            fi
+            ;;
+    esac
     case "$1" in
         -u|--unit)        RUN_UNIT=true;        ANY_PHASE_SELECTED=true; shift ;;
         -i|--integration) RUN_INTEGRATION=true; ANY_PHASE_SELECTED=true; shift ;;
@@ -99,6 +106,11 @@ while [[ $# -gt 0 ]]; do
         *) echo -e "${RED}Unknown option: $1${NC}" >&2; echo "Try '$0 --help'." >&2; exit 2 ;;
     esac
 done
+
+if [[ -n "$DEMO_ACT" && ! "$DEMO_ACT" =~ ^[1-6]$ ]]; then
+    echo "--act must be between 1 and 6." >&2
+    exit 2
+fi
 
 if [[ "$LIST_ONLY" == true ]]; then
     if [[ "$ENGINE" == "local" ]]; then
@@ -228,18 +240,13 @@ run_docker_engine() {
 }
 
 # ==============================================================================
-#   로컬 엔진 (Linux)
+#   로컬 엔진 (Linux/macOS)
 # ==============================================================================
 run_local_engine() {
     if [[ ! -d "$BUILD_DIR" ]]; then
         log_error "빌드 디렉터리가 없습니다: $BUILD_DIR"
         log_error "먼저 ./build.sh 로 빌드하십시오."
         exit 2
-    fi
-
-    if [[ "$(uname -s)" == "Darwin" ]]; then
-        log_warn "macOS 에서는 efsw(arm64-osx) vcpkg 빌드가 실패해 로컬 빌드가 유지되지 않습니다."
-        log_warn "결과가 낡은 산출물에 근거할 수 있습니다. Docker 엔진을 권장합니다."
     fi
 
     if [[ "$RUN_UNIT" == true ]]; then

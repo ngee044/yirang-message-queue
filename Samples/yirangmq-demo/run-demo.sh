@@ -35,6 +35,14 @@ print_usage()
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
+		--bin-dir|--queue|--act)
+			if [[ $# -lt 2 || -z "$2" || "$2" == -* ]]; then
+				echo "옵션 $1 에 값이 필요합니다" >&2
+				exit 2
+			fi
+			;;
+	esac
+	case "$1" in
 		--bin-dir) BIN_DIR="$2"; shift 2 ;;
 		--queue)   QUEUE="$2"; shift 2 ;;
 		--act)     ONLY_ACT="$2"; shift 2 ;;
@@ -44,6 +52,11 @@ while [[ $# -gt 0 ]]; do
 		*) echo "알 수 없는 옵션: $1" >&2; exit 2 ;;
 	esac
 done
+
+if [[ -n "$ONLY_ACT" && ! "$ONLY_ACT" =~ ^[1-6]$ ]]; then
+	echo "--act 는 1~6 사이여야 합니다" >&2
+	exit 2
+fi
 
 RED=$'\033[0;31m'
 GREEN=$'\033[0;32m'
@@ -303,6 +316,13 @@ act_4()
 # ── 장면 5: DLQ 재처리 ───────────────────────────────────────────────────────
 act_5()
 {
+	if [[ "$ONLY_ACT" == "5" ]]; then
+		act_4
+		if [[ $FAIL_COUNT -gt 0 ]]; then
+			return
+		fi
+	fi
+
 	scene "장면 5 — 원인을 조치한 뒤 DLQ 메시지를 재투입한다"
 
 	if ! $MONITOR reprocess --queue "$QUEUE" --first; then

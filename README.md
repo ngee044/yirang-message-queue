@@ -810,14 +810,14 @@ while (running)
 
 ```bash
 ./test.sh                     # 전체 3단계
-./test.sh --unit              # 단위만 (11개 스위트 / 298 케이스)
+./test.sh --unit              # 단위만 (12개 실행 파일, 목록은 --list로 확인)
 ./test.sh --integration       # 데몬 + CLI 종단 시나리오만
 ./test.sh --demo              # 시연 장면만
 ./test.sh --list              # ctest 테스트 이름 열거
 ./test.sh --no-build          # 이미지 재빌드 없이 반복 실행
 ```
 
-기본 엔진은 Docker입니다. macOS에서는 efsw의 vcpkg 빌드가 arm64-osx에서 실패해 로컬 빌드가 유지되지 않으므로, Docker가 유일한 검증 경로입니다.
+기본 엔진은 Docker이며 Linux/GCC 검증에 사용합니다. macOS에서도 `./build.sh --test`로 빌드·단위 테스트를 실행하거나 `./test.sh --local`로 단위 테스트와 시연을 실행할 수 있습니다. 통합 시나리오는 Docker에서 실행합니다.
 
 직접 호출하려면:
 
@@ -836,10 +836,11 @@ cd docker && ./docker-compose.sh demo          # 시연 (실행 중인 서비스
 | `TestMessageValidator` | 스키마 규칙 |
 | `TestConfigurations` | 설정 로딩과 검증·폴백 |
 | `TestFile` / `TestLogger` / `TestConverter` | 공용 유틸리티 |
+| `TestThreadPool` | 워커 실행·종료와 잡 재등록 |
 
 통합 테스트는 컨테이너 안에서 데몬을 띄우고 헬스 체크, 발행, 큐 상태, 소비, ACK, NACK, 메트릭, 지정 배달, DLQ 조회, 정상 종료까지 실제 프로세스 경계를 지나며 확인합니다.
 
-> macOS 로컬에서는 efsw의 vcpkg 빌드가 되지 않으므로 테스트는 Docker로 실행하십시오.
+`--act`는 1~6만 허용하며, 장면 5를 단독 실행하면 필요한 DLQ 메시지를 장면 4로 먼저 준비합니다.
 
 ### 도입 전 알아야 할 한계
 

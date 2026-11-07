@@ -236,6 +236,10 @@ public:
 		for (int32_t i = 0; i < max_messages; ++i)
 		{
 			auto result = lease_next(queue, consumer_id, visibility_timeout_sec);
+			if (result.error.has_value())
+			{
+				return { results, result.error };
+			}
 			if (!result.leased)
 			{
 				break;

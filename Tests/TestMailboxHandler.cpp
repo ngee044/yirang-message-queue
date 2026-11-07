@@ -6,6 +6,7 @@
 #include <nlohmann/json.hpp>
 
 #include <chrono>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
@@ -50,6 +51,7 @@ public:
 
 	// Configurable return for lease_next
 	LeaseResult next_lease_result = { false, std::nullopt, std::nullopt, std::nullopt };
+	std::deque<LeaseResult> lease_results;
 
 	// Configurable return for enqueue
 	bool enqueue_should_succeed = true;
@@ -128,6 +130,12 @@ public:
 		-> LeaseResult override
 	{
 		std::lock_guard<std::mutex> lock(mutex_);
+		if (!lease_results.empty())
+		{
+			auto result = lease_results.front();
+			lease_results.pop_front();
+			return result;
+		}
 		return next_lease_result;
 	}
 
@@ -1407,6 +1415,102 @@ TEST_F(MailboxHandlerTest, BatchConsumeReturnsValidResponse)
 	EXPECT_TRUE(data.contains("messages"));
 	EXPECT_TRUE(data["messages"].is_array());
 	EXPECT_EQ(data["count"].get<int32_t>(), 0); // Empty queue
+	EXPECT_FALSE(data.contains("error"));
+}
+
+TEST_F(MailboxHandlerTest, BatchConsumeReportsBackendFailure)
+{
+	mock_backend_->next_lease_result.error = "mock lease failure";
+	auto [ok, error] = handler_->start();
+	ASSERT_TRUE(ok) << error.value_or("unknown");
+
+	write_request(make_request_json("batch-failure", "client-1", "batchConsume", { { "queue", "test-q" } }));
+	auto response = wait_for_response("client-1", "batch-failure");
+	ASSERT_TRUE(response.has_value());
+	EXPECT_FALSE((*response)["ok"].get<bool>());
+	EXPECT_EQ((*response)["error"]["code"], "ERR_INTERNAL_ERROR");
+	EXPECT_EQ((*response)["error"]["message"], "mock lease failure");
+}
+
+TEST_F(MailboxHandlerTest, BatchConsumePreservesLeasesOnPartialFailure)
+{
+	MessageEnvelope message{};
+	message.key = "msg:test-q:message-1";
+	message.message_id = "message-1";
+	message.queue = "test-q";
+	message.payload_json = R"({"value":1})";
+	message.attributes_json = "{}";
+	LeaseToken lease{};
+	lease.lease_id = "lease-1";
+	lease.message_key = message.key;
+	lease.consumer_id = "client-1";
+	lease.lease_until_ms = now_ms() + 30000;
+	mock_backend_->lease_results.push_back({ true, message, lease, std::nullopt });
+	mock_backend_->lease_results.push_back({ false, std::nullopt, std::nullopt, "mock lease failure" });
+	auto [ok, error] = handler_->start();
+	ASSERT_TRUE(ok) << error.value_or("unknown");
+
+	write_request(make_request_json("batch-partial", "client-1", "batchConsume", { { "queue", "test-q" } }));
+	auto response = wait_for_response("client-1", "batch-partial");
+	ASSERT_TRUE(response.has_value());
+	EXPECT_TRUE((*response)["ok"].get<bool>());
+	const auto& data = (*response)["data"];
+	ASSERT_EQ(data["count"], 1);
+	EXPECT_EQ(data["messages"][0]["lease"]["leaseId"], lease.lease_id);
+	EXPECT_EQ(data["messages"][0]["message"]["messageKey"], message.key);
+	EXPECT_EQ(data["error"]["code"], "ERR_INTERNAL_ERROR");
+	EXPECT_EQ(data["error"]["message"], "mock lease failure");
+}
+
+TEST_F(MailboxHandlerTest, RejectsUnsafeQueueBeforeDispatch)
+{
+	auto [ok, error] = handler_->start();
+	ASSERT_TRUE(ok) << error.value_or("unknown");
+	const std::vector<std::string> queues = { "../escape", "/tmp/escape", "..", "a/b", "a\\b", std::string("a\0b", 3) };
+	const std::vector<std::string> commands = { "publish", "consume", "status", "list_dlq", "batchPublish", "batchConsume" };
+	int32_t index = 0;
+	for (const auto& queue : queues)
+	{
+		for (const auto& command : commands)
+		{
+			const auto request_id = std::format("unsafe-queue-{}", index++);
+			write_request(make_request_json(request_id, "client-1", command,
+				{ { "queue", queue }, { "message", "{}" }, { "messages", json::array() } }));
+			auto response = wait_for_response("client-1", request_id);
+			ASSERT_TRUE(response.has_value()) << command << ": " << queue;
+			EXPECT_FALSE((*response)["ok"].get<bool>());
+			EXPECT_EQ((*response)["error"]["code"], "ERR_INVALID_REQUEST");
+		}
+	}
+	EXPECT_TRUE(mock_backend_->get_enqueue_calls().empty());
+}
+
+TEST_F(MailboxHandlerTest, RejectsUnsafeMessageKeyBeforeDispatch)
+{
+	auto [ok, error] = handler_->start();
+	ASSERT_TRUE(ok) << error.value_or("unknown");
+	const std::vector<std::string> keys = {
+		"../../escape", "msg:..:id", "msg:queue:../../id", "msg:queue:a\\b",
+		"msg_queue:id", "msg:queue_id", "other:queue:id", "msg:queue:id:extra"
+	};
+	const std::vector<std::string> commands = { "ack", "nack", "extendLease", "reprocess" };
+	int32_t index = 0;
+	for (const auto& key : keys)
+	{
+		for (const auto& command : commands)
+		{
+			const auto request_id = std::format("unsafe-key-{}", index++);
+			write_request(make_request_json(request_id, "client-1", command, { { "messageKey", key } }));
+			auto response = wait_for_response("client-1", request_id);
+			ASSERT_TRUE(response.has_value());
+			EXPECT_FALSE((*response)["ok"].get<bool>());
+			EXPECT_EQ((*response)["error"]["code"], "ERR_INVALID_REQUEST");
+		}
+	}
+	EXPECT_TRUE(mock_backend_->get_ack_calls().empty());
+	EXPECT_TRUE(mock_backend_->get_nack_calls().empty());
+	EXPECT_TRUE(mock_backend_->get_extend_calls().empty());
+	EXPECT_TRUE(mock_backend_->get_reprocess_calls().empty());
 }
 
 // ============================================================

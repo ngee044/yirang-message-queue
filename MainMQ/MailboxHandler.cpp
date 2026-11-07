@@ -78,13 +78,13 @@ auto MailboxHandler::start(void) -> std::tuple<bool, std::optional<std::string>>
 	// Add ThreadWorkers for LongTerm jobs
 	auto request_worker = std::make_shared<Thread::ThreadWorker>(
 		std::vector<Thread::JobPriorities>{ Thread::JobPriorities::LongTerm },
-		"MailboxRequestWorker"
+		"mailbox_worker_1"
 	);
 	thread_pool_->push(request_worker);
 
 	auto cleanup_worker = std::make_shared<Thread::ThreadWorker>(
 		std::vector<Thread::JobPriorities>{ Thread::JobPriorities::LongTerm },
-		"MailboxCleanupWorker"
+		"mailbox_worker_2"
 	);
 	thread_pool_->push(cleanup_worker);
 
@@ -129,7 +129,7 @@ auto MailboxHandler::start(void) -> std::tuple<bool, std::optional<std::string>>
 			request_processing_worker();
 			return {};
 		},
-		"MailboxRequestWorker"
+		"request_processing_worker"
 	);
 	thread_pool_->push(request_job);
 
@@ -141,7 +141,7 @@ auto MailboxHandler::start(void) -> std::tuple<bool, std::optional<std::string>>
 			stale_cleanup_worker();
 			return {};
 		},
-		"MailboxCleanupWorker"
+		"stale_cleanup_worker"
 	);
 	thread_pool_->push(cleanup_job);
 
@@ -511,7 +511,8 @@ auto MailboxHandler::atomic_write(const std::string& target_path, const std::str
 	std::filesystem::rename(temp_path, target_path, ec);
 	if (ec)
 	{
-		std::filesystem::remove(temp_path, ec);
+		std::error_code cleanup_error;
+		std::filesystem::remove(temp_path, cleanup_error);
 		return { false, std::format("rename failed: {}", ec.message()) };
 	}
 
@@ -581,9 +582,9 @@ auto MailboxHandler::delete_processed(const std::string& processing_file)
 
 namespace
 {
-	auto is_safe_path_component(const std::string& value) -> bool
+	auto is_safe_path_component(const std::string& value, size_t max_length = 128) -> bool
 	{
-		if (value.empty() || value.size() > 128)
+		if (value.empty() || value.size() > max_length)
 		{
 			return false;
 		}
@@ -604,6 +605,18 @@ namespace
 		}
 
 		return true;
+	}
+
+	auto is_safe_message_key(const std::string& value) -> bool
+	{
+		if (!value.starts_with("msg:"))
+		{
+			return false;
+		}
+		auto separator = value.find(':', 4);
+		return separator != std::string::npos
+			&& is_safe_path_component(value.substr(4, separator - 4), 256)
+			&& is_safe_path_component(value.substr(separator + 1), 256);
 	}
 }
 
@@ -722,6 +735,25 @@ auto MailboxHandler::parse_command(const std::string& command_str) -> MailboxCom
 
 auto MailboxHandler::handle_request(const MailboxRequest& request) -> MailboxResponse
 {
+	try
+	{
+		const auto payload = json::parse(request.payload_json);
+		if (payload.contains("queue") && (!payload["queue"].is_string()
+			|| !is_safe_path_component(payload["queue"].get<std::string>(), 256)))
+		{
+			return build_error_response(request.request_id, MailboxErrorCode::INVALID_REQUEST, "invalid queue in payload");
+		}
+		if (payload.contains("messageKey") && (!payload["messageKey"].is_string()
+			|| !is_safe_message_key(payload["messageKey"].get<std::string>())))
+		{
+			return build_error_response(request.request_id, MailboxErrorCode::INVALID_REQUEST, "invalid messageKey in payload");
+		}
+	}
+	catch (const json::exception& e)
+	{
+		return build_error_response(request.request_id, MailboxErrorCode::PARSE_ERROR, e.what());
+	}
+
 	switch (request.command)
 	{
 	case MailboxCommand::Publish:
@@ -1564,6 +1596,14 @@ auto MailboxHandler::handle_batch_consume(const MailboxRequest& request) -> Mail
 		}
 
 		auto [results, error] = backend_->batch_lease_next(queue, consumer_id, visibility_timeout, max_messages);
+		if (error.has_value())
+		{
+			Logger::handle().write(LogTypes::Error, std::format("Batch consume failed for queue {}: {}", queue, error.value()));
+			if (results.empty())
+			{
+				return build_error_response(request.request_id, MailboxErrorCode::INTERNAL_ERROR, error.value());
+			}
+		}
 
 		json response_data;
 		json messages_array = json::array();
@@ -1605,6 +1645,11 @@ auto MailboxHandler::handle_batch_consume(const MailboxRequest& request) -> Mail
 
 		response_data["messages"] = messages_array;
 		response_data["count"] = static_cast<int32_t>(messages_array.size());
+		if (error.has_value())
+		{
+			// Preserve issued lease tokens so a partial batch can still be acknowledged.
+			response_data["error"] = { { "code", MailboxErrorCode::INTERNAL_ERROR }, { "message", error.value() } };
+		}
 
 		return build_success_response(request.request_id, response_data.dump());
 	}

@@ -535,6 +535,20 @@ namespace
 
 		auto Configurations::validate() -> void
 		{
+			if (mailbox_config_.poll_interval_ms <= 0)
+			{
+				Logger::handle().write(LogTypes::Information,
+					std::format("Invalid ipc.pollIntervalMs ({}), using default 100", mailbox_config_.poll_interval_ms));
+				mailbox_config_.poll_interval_ms = 100;
+			}
+
+			if (mailbox_config_.stale_timeout_ms <= 0)
+			{
+				Logger::handle().write(LogTypes::Information,
+					std::format("Invalid ipc.staleTimeoutMs ({}), using default 30000", mailbox_config_.stale_timeout_ms));
+				mailbox_config_.stale_timeout_ms = 30000;
+			}
+
 			// Validate lease timeouts
 			if (lease_visibility_timeout_sec_ <= 0)
 			{

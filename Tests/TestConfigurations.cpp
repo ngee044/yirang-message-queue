@@ -360,6 +360,57 @@ TEST_F(ConfigurationsTest, MailboxConfigParsing)
 	EXPECT_EQ(mailbox.poll_interval_ms, 250);
 }
 
+TEST_F(ConfigurationsTest, ZeroMailboxTimingsUseDefaults)
+{
+	json config = {
+		{ "ipc", {
+			{ "staleTimeoutMs", 0 },
+			{ "pollIntervalMs", 0 }
+		} }
+	};
+
+	ConfigFileGuard guard(config);
+	auto cfg = guard.make_configurations();
+	auto mailbox = cfg->mailbox_config();
+
+	EXPECT_EQ(mailbox.stale_timeout_ms, 30000);
+	EXPECT_EQ(mailbox.poll_interval_ms, 100);
+}
+
+TEST_F(ConfigurationsTest, NegativeMailboxTimingsUseDefaults)
+{
+	json config = {
+		{ "ipc", {
+			{ "staleTimeoutMs", -1000 },
+			{ "pollIntervalMs", -1 }
+		} }
+	};
+
+	ConfigFileGuard guard(config);
+	auto cfg = guard.make_configurations();
+	auto mailbox = cfg->mailbox_config();
+
+	EXPECT_EQ(mailbox.stale_timeout_ms, 30000);
+	EXPECT_EQ(mailbox.poll_interval_ms, 100);
+}
+
+TEST_F(ConfigurationsTest, PositiveMailboxTimingsArePreserved)
+{
+	json config = {
+		{ "ipc", {
+			{ "staleTimeoutMs", 1 },
+			{ "pollIntervalMs", 1 }
+		} }
+	};
+
+	ConfigFileGuard guard(config);
+	auto cfg = guard.make_configurations();
+	auto mailbox = cfg->mailbox_config();
+
+	EXPECT_EQ(mailbox.stale_timeout_ms, 1);
+	EXPECT_EQ(mailbox.poll_interval_ms, 1);
+}
+
 // =============================================================================
 // LeaseConfigParsing
 // =============================================================================
